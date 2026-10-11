@@ -14,10 +14,12 @@
 %global _build_id_links none
 
 %global wm_appdir /opt/wemeet
+# 是否集成 Wayland 屏幕共享 hook（修复关闭共享后再次共享的 TOCTOU 段错误）
+%{!?wemeet_hook:%global wemeet_hook 1}
 
 Name:           wemeet
 %{!?wemeet_version:%global wemeet_version 3.26.10.401}
-%{!?wemeet_release:%global wemeet_release 2}
+%{!?wemeet_release:%global wemeet_release 3}
 Version:        %{wemeet_version}
 Release:        %{wemeet_release}%{?wemeet_dist}%{!?wemeet_dist:%{?dist}}
 Summary:        Tencent Meeting (Wemeet) client (repackaged from official .deb)
@@ -26,10 +28,16 @@ License:        Proprietary
 URL:            https://wemeet.qq.com
 Source0:        wemeet-data.tar.xz
 Source1:        wemeet-rpm-helpers.tar.gz
+Source2:        libhook.c
 %{!?wemeet_arch:%global wemeet_arch x86_64}
 BuildArch:      %{wemeet_arch}
 # 用于给 libscreen_share_module.so 打 Wayland 屏幕共享补丁（见 %install）
 BuildRequires:  python3
+%if %{wemeet_hook}
+# 编译屏幕共享 hook 需要 gcc 与 pipewire 头文件
+BuildRequires:  gcc
+BuildRequires:  pipewire-devel
+%endif
 
 # Runtime tools used by the client and by its maintainer scripts.
 Requires:       bash
@@ -64,6 +72,13 @@ mkdir -p payload helpers
 tar -xf %{SOURCE0} -C payload
 tar -xf %{SOURCE1} -C .
 
+%build
+%if %{wemeet_hook}
+# 编译 Wayland 屏幕共享 hook（straight 模式：仅缓存帧以修复 TOCTOU 段错误，
+# 不做 BGRx/RGBx 颜色转换，适配 GNOME 等原生支持 BGRx 的后端）。
+gcc -O3 -shared -fPIC -o libhook.so %{SOURCE2} $(pkg-config --cflags libpipewire-0.3) -ldl
+%endif
+
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
@@ -96,6 +111,18 @@ done
 # 确保启动脚本与主程序可执行
 chmod 0755 "%{buildroot}%{wm_appdir}/wemeetapp.sh" 2>/dev/null || true
 chmod 0755 "%{buildroot}%{wm_appdir}/bin/wemeetapp" 2>/dev/null || true
+
+# 安装 Wayland 屏幕共享 hook，并在启动脚本中预加载。
+# 该 hook 在 PipeWire 回调里把帧拷进自己的静态缓冲并立即归还系统缓冲，
+# 修复 WeMeet 未锁定缓冲池导致的 TOCTOU 段错误（关闭共享后再次共享时闪退）。
+# 运行时可用 WEMEET_NO_HOOK=1 关闭预加载。
+%if %{wemeet_hook}
+install -m 0755 libhook.so "%{buildroot}%{_libexecdir}/wemeet/libhook.so"
+sed -i 's|^exec wemeetapp |[ -n "$WEMEET_NO_HOOK" ] \|\| export LD_PRELOAD="%{_libexecdir}/wemeet/libhook.so${LD_PRELOAD:+:$LD_PRELOAD}"\nexec wemeetapp |' \
+    "%{buildroot}%{wm_appdir}/wemeetapp.sh"
+grep -q 'libhook.so' "%{buildroot}%{wm_appdir}/wemeetapp.sh" \
+    || { echo "ERROR: 未能把 libhook.so 注入 wemeetapp.sh" >&2; exit 1; }
+%endif
 
 %files
 %defattr(-,root,root,-)

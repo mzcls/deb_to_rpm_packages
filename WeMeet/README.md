@@ -11,8 +11,8 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `wemeet-3.26.10.401-2.fc45.x86_64.rpm` | 可直接安装的二进制 RPM（约 201 MiB，装后约 662 MiB） |
-| `wemeet-3.26.10.401-2.fc45.src.rpm` | 源码 RPM（内含 deb 原始数据包与适配脚本，可重新构建） |
+| `wemeet-3.26.10.401-3.fc45.x86_64.rpm` | 可直接安装的二进制 RPM（约 201 MiB，装后约 662 MiB） |
+| `wemeet-3.26.10.401-3.fc45.src.rpm` | 源码 RPM（内含 deb 原始数据包与适配脚本，可重新构建） |
 | `rpm-packaging/SPECS/wemeet.spec` | spec 文件 |
 | `rpm-packaging/helpers/` | 从 deb 的 control 脚本移植并适配后的安装/卸载脚本 |
 | `rpm-packaging/patches/wemeet-dbus-race-fix.py` | Wayland 屏幕共享修复补丁（见下） |
@@ -22,7 +22,7 @@
 
 ```bash
 # 安装
-sudo dnf install ./wemeet-3.26.10.401-2.fc45.x86_64.rpm
+sudo dnf install ./wemeet-3.26.10.401-3.fc45.x86_64.rpm
 
 # 卸载
 sudo dnf remove wemeet
@@ -48,9 +48,25 @@ Response** 就调用 `Start`，属于竞态（未定义行为）。GNOME 的 por
 [Matheritasiv/wemeet-screenshare-patch](https://github.com/Matheritasiv/wemeet-screenshare-patch)。
 
 **为什么不打颜色格式补丁（Hunk 1a/1b）**：该补丁会把请求的 `BGRx` 篡改为
-`RGBx` 并需要额外 `LD_PRELOAD` hook。而 GNOME 的 portal 后端原生支持 `BGRx`、
-不提供 `RGBx`，打上后反而协商失败导致**白屏/黑屏**（见上游 issue #2、#3）。
-因此本包**只应用 Hunk 0**，不引入 hook，也不会改动启动脚本。
+`RGBx`。而 GNOME 的 portal 后端原生支持 `BGRx`、不提供 `RGBx`，打上后反而协商
+失败导致**白屏/黑屏**（见上游 issue #2）。因此本包**不应用颜色补丁**。
+
+### 关闭共享后再次共享会崩溃（已用 hook 修复）
+
+Hunk 0 只能让**第一次**共享成功。WeMeet 还有一个独立的 TOCTOU 缺陷：PipeWire
+回调把帧指针交给后台线程（`libxcast.so`）异步拷贝，却**没有按规范锁定缓冲池**；
+缓冲耗尽时 portal 会 `Out of buffers` 并 `unmap` 该内存，此时客户端仍在拷贝 →
+**SIGSEGV 闪退**（表现为“关掉共享、再开就崩溃”）。
+
+本包在构建阶段编译社区 hook（来源
+[GodKeawa/wemeet-bin-wayland-screenshare-fix](https://github.com/GodKeawa/wemeet-bin-wayland-screenshare-fix)，
+**固定到 commit 并校验 sha256**），并在 `wemeetapp.sh` 中 `LD_PRELOAD` 它：
+hook 在 PipeWire 回调里把帧拷进自己的静态缓冲、**立即把系统缓冲归还**，同时 hook
+`libxcast.so` 的 `copy_image` 走自己的拷贝实现。采用 `straight` 模式（仅缓存帧、
+**不**做颜色转换），与 GNOME 的 `BGRx` 兼容。
+
+- 运行时可用 `WEMEET_NO_HOOK=1` 关闭该预加载。
+- 编译期可用 `WEMEET_HOOK=0 ./build-rpm.sh ...` 完全不集成 hook。
 
 使用前提（RPM 已声明依赖 / 建议）：
 
@@ -59,10 +75,12 @@ Response** 就调用 `Start`，属于竞态（未定义行为）。GNOME 的 por
 - 若共享时选区弹窗不出现或黑屏，请确认上述组件已安装且
   `systemctl --user status xdg-desktop-portal` 正常。
 
-> 注意：该补丁的字节偏移针对 **wemeet 3.26.10.401**。升级到新版本后字节可能不再
+> 注意：Hunk 0 的字节偏移针对 **wemeet 3.26.10.401**；升级到新版本后字节可能不再
 > 匹配，构建日志会出现 `[wemeet-patch] WARNING: unrecognised WeMeet build` 并
-> **跳过错补丁**（不会中断构建）——此时需要按上游补丁更新
+> **跳过该补丁**（不会中断构建）——此时需要按上游补丁更新
 > `rpm-packaging/patches/wemeet-dbus-race-fix.py` 中的偏移。
+> hook（`libhook.c`，按流水线固定 commit + sha256）与 pipewire 头文件 ABI 相关，
+> 更换 pipewire 大版本后建议重新构建。
 
 ## 从 deb 重新构建（一键脚本，支持升级版本）
 
@@ -115,11 +133,11 @@ https://updatecdn.meeting.qq.com/cos/72e0e0023e1d1e6d4123fba28821aea1/TencentMee
 ```
 WeMeet/
 ├── version                                # deb 下载地址（改这里升级版本）
-├── build-rpm.sh                           # 一键构建脚本
+├── build-rpm.sh                           # 一键构建脚本（含下载/校验 libhook.c）
 ├── rpm-packaging/
 │   ├── SPECS/wemeet.spec
 │   ├── helpers/                           # 适配后的安装/卸载脚本
-│   └── patches/                           # Wayland 屏幕共享修复补丁
+│   └── patches/                           # Wayland 屏幕共享补丁（Hunk 0）
 └── README.md
 ```
 
@@ -151,7 +169,8 @@ WeMeet/
    `update-desktop-database` 与 `gtk-update-icon-cache` 刷新缓存（对应官方脚本里的
    `update-desktop-database`）。
 5. **Wayland 屏幕共享**：构建阶段对 `libscreen_share_module.so` 应用 Hunk 0 补丁，
-   修复 xdg-desktop-portal ScreenCast 的 D-Bus 竞态（详见「Wayland 屏幕共享」一节）。
+   并编译/预加载 `libhook.so`（修复“关闭共享后再次共享”的 TOCTOU 段错误）；
+   详见「Wayland 屏幕共享」一节。
 
 ## 已验证
 
@@ -168,7 +187,8 @@ WeMeet/
   而失败（与官方 deb 行为一致）。
 - 大批量下载/会议等网络功能依赖系统 `libnss3`、`libgcrypt`、`libpulse` 等，
   这些已在上游 deb 的 `Depends` 中声明，rpm 会自动从 ELF 生成对应依赖。
-- Wayland 屏幕共享补丁的偏移**仅匹配 wemeet 3.26.10.401**；升级版本后若字节不匹配会
-  自动跳过（构建日志有告警），需要同步更新 `rpm-packaging/patches/`。
-- 本包只修复共享屏幕的 D-Bus 竞态，不涉及颜色格式转换；在**非 GNOME** 且 pipewire
-  协商不支持 `BGRx` 的后端上仍可能需要上游的颜色补丁（Hunk 1a/1b + hook）。
+- Wayland 屏幕共享的 Hunk 0 补丁偏移**仅匹配 wemeet 3.26.10.401**；升级版本后若字节
+  不匹配会自动跳过（构建日志有告警），需要同步更新 `rpm-packaging/patches/`。
+- 崩溃修复 hook（`libhook.c`）按**固定 commit + sha256** 从上游获取（构建时下载），
+  依赖 pipewire 头文件 ABI；更换 pipewire 大版本后建议重新构建。它只做帧缓存、
+  **不**转颜色，在不支持 `BGRx` 的后端上仍可能需要上游的颜色补丁（Hunk 1a/1b + swap）。

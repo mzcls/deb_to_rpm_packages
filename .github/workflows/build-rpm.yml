@@ -157,7 +157,7 @@ jobs:
 
       - name: 安装构建依赖
         run: |
-          dnf install -y rpm-build binutils xz curl tar gzip git git-lfs findutils patchelf
+          dnf install -y rpm-build binutils xz curl tar gzip git git-lfs findutils patchelf gcc pipewire-devel
 
       - name: 检出仓库
         uses: actions/checkout@v4

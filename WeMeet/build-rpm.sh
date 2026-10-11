@@ -23,7 +23,7 @@ OUTDIR="$HERE/dist"
 
 DEB="${WEMEET_DEB:-}"
 DEB_URL="${WEMEET_DEB_URL:-}"
-RELEASE="${WEMEET_RELEASE:-2}"
+RELEASE="${WEMEET_RELEASE:-3}"
 VER_OVERRIDE="${WEMEET_VERSION:-}"
 ARCH_OVERRIDE="${WEMEET_ARCH:-}"
 DIST_REQ=""
@@ -176,11 +176,30 @@ fi
 ( cd "$tmp/stage" && tar czf "$TOP/SOURCES/wemeet-rpm-helpers.tar.gz" helpers patches )
 cp "$PKG_DIR"/SPECS/*.spec "$TOP/SPECS/"
 
+# --- Wayland 屏幕共享 hook（修复关闭共享后再次共享的 TOCTOU 段错误）----------
+# 源码来源：GodKeawa/wemeet-bin-wayland-screenshare-fix
+# 固定到 commit 并校验 sha256，避免上游改动导致不可复现。
+LIBHOOK_COMMIT="d497aed4f222deb422edc360effd4cd1c7ea9005"
+LIBHOOK_SHA256="76a194b3948ef855f0eec5c753166114018162da37a1a5cc53e46d5eb3146e1d"
+LIBHOOK_URL="https://raw.githubusercontent.com/GodKeawa/wemeet-bin-wayland-screenshare-fix/${LIBHOOK_COMMIT}/libhook.c"
+HOOK_ENABLE="${WEMEET_HOOK:-1}"
+if [ "$HOOK_ENABLE" = "1" ]; then
+  command -v curl >/dev/null 2>&1 || { echo "错误: 需要 curl 下载 libhook.c" >&2; exit 1; }
+  echo "[*] 下载屏幕共享 hook 源码: ${LIBHOOK_COMMIT:0:12}"
+  curl -fL --retry 3 --retry-delay 2 -o "$TOP/SOURCES/libhook.c" "$LIBHOOK_URL"
+  echo "${LIBHOOK_SHA256}  $TOP/SOURCES/libhook.c" | sha256sum -c - >/dev/null 2>&1 \
+    || { echo "错误: libhook.c 校验失败（期望 $LIBHOOK_SHA256）" >&2; exit 1; }
+else
+  echo "[*] WEMEET_HOOK=0：不集成屏幕共享 hook"
+  : > "$TOP/SOURCES/libhook.c"
+fi
+
 DEFINES=(
   --define "_topdir $TOP"
   --define "wemeet_version $RPM_VERSION"
   --define "wemeet_release $RELEASE"
   --define "wemeet_arch $RPM_ARCH"
+  --define "wemeet_hook $HOOK_ENABLE"
 )
 if [ "$DIST_GIVEN" = 1 ]; then
   if [ "$DIST_REQ" = "none" ]; then
