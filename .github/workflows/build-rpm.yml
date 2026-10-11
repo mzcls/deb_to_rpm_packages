@@ -96,22 +96,30 @@ jobs:
             echo "手动触发，构建全部包"
           else
             # push：根据变更文件判断受影响的包
+            initial=0
             if [ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
               changed="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
             else
-              changed="$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")"
+              # 首次推送（before 为全 0）/ 无法确定基线：构建全部
+              initial=1
+              changed=""
             fi
             echo "本次变更文件："; echo "${changed}"
-            for p in "${ALL[@]}"; do
-              dir="$(awk -F'\t' -v k="$p" '$1==k{print $2}' /tmp/pkgs.tsv)"
-              if printf '%s\n' "${changed}" | grep -qE "^${dir}/"; then
-                chosen+=("$p")
-              fi
-            done
-            # 仅工作流自身变化时，稳妥起见构建全部
-            if [ "${#chosen[@]}" -eq 0 ] && printf '%s\n' "${changed}" | grep -qE '^\.github/'; then
+            if [ "${initial}" = 1 ]; then
               chosen=("${ALL[@]}")
-              echo "仅工作流变化，构建全部包"
+              echo "无法确定变更基线（可能为首次推送），构建全部包"
+            else
+              for p in "${ALL[@]}"; do
+                dir="$(awk -F'\t' -v k="$p" '$1==k{print $2}' /tmp/pkgs.tsv)"
+                if printf '%s\n' "${changed}" | grep -qE "^${dir}/"; then
+                  chosen+=("$p")
+                fi
+              done
+              # 仅工作流自身变化时，稳妥起见构建全部
+              if [ "${#chosen[@]}" -eq 0 ] && printf '%s\n' "${changed}" | grep -qE '^\.github/'; then
+                chosen=("${ALL[@]}")
+                echo "仅工作流变化，构建全部包"
+              fi
             fi
           fi
 
