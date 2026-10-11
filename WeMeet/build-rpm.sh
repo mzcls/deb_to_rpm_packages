@@ -23,7 +23,7 @@ OUTDIR="$HERE/dist"
 
 DEB="${WEMEET_DEB:-}"
 DEB_URL="${WEMEET_DEB_URL:-}"
-RELEASE="${WEMEET_RELEASE:-1}"
+RELEASE="${WEMEET_RELEASE:-2}"
 VER_OVERRIDE="${WEMEET_VERSION:-}"
 ARCH_OVERRIDE="${WEMEET_ARCH:-}"
 DIST_REQ=""
@@ -67,8 +67,8 @@ if [ "$DIST_GIVEN" = 0 ] && [ -n "${WEMEET_DIST:-}" ]; then
   DIST_GIVEN=1
 fi
 
-for cmd in rpmbuild ar xz; do
-  command -v "$cmd" >/dev/null 2>&1 || { echo "错误: 缺少命令 '$cmd'，请先安装: sudo dnf install -y rpm-build binutils xz" >&2; exit 1; }
+for cmd in rpmbuild ar xz python3; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "错误: 缺少命令 '$cmd'，请先安装: sudo dnf install -y rpm-build binutils xz python3" >&2; exit 1; }
 done
 
 # --- 检查仓库内的打包文件 ---------------------------------------------------
@@ -168,9 +168,12 @@ rm -rf "$TOP"
 mkdir -p "$TOP"/BUILD "$TOP"/BUILDROOT "$TOP"/RPMS "$TOP"/SOURCES "$TOP"/SPECS "$TOP"/SRPMS
 
 cp "$tmp/$data_tar" "$TOP/SOURCES/wemeet-data.tar.xz"
-mkdir -p "$tmp/stage/helpers"
+mkdir -p "$tmp/stage/helpers" "$tmp/stage/patches"
 cp "$PKG_DIR"/helpers/* "$tmp/stage/helpers/"
-( cd "$tmp/stage" && tar czf "$TOP/SOURCES/wemeet-rpm-helpers.tar.gz" helpers )
+if [ -d "$PKG_DIR/patches" ]; then
+  cp "$PKG_DIR"/patches/* "$tmp/stage/patches/"
+fi
+( cd "$tmp/stage" && tar czf "$TOP/SOURCES/wemeet-rpm-helpers.tar.gz" helpers patches )
 cp "$PKG_DIR"/SPECS/*.spec "$TOP/SPECS/"
 
 DEFINES=(

@@ -17,7 +17,7 @@
 
 Name:           wemeet
 %{!?wemeet_version:%global wemeet_version 3.26.10.401}
-%{!?wemeet_release:%global wemeet_release 1}
+%{!?wemeet_release:%global wemeet_release 2}
 Version:        %{wemeet_version}
 Release:        %{wemeet_release}%{?wemeet_dist}%{!?wemeet_dist:%{?dist}}
 Summary:        Tencent Meeting (Wemeet) client (repackaged from official .deb)
@@ -28,6 +28,8 @@ Source0:        wemeet-data.tar.xz
 Source1:        wemeet-rpm-helpers.tar.gz
 %{!?wemeet_arch:%global wemeet_arch x86_64}
 BuildArch:      %{wemeet_arch}
+# 用于给 libscreen_share_module.so 打 Wayland 屏幕共享补丁（见 %install）
+BuildRequires:  python3
 
 # Runtime tools used by the client and by its maintainer scripts.
 Requires:       bash
@@ -40,10 +42,16 @@ Requires:       procps-ng
 Requires:       psmisc
 Requires:       glibc
 Requires:       zlib
+# Wayland 屏幕共享：客户端动态加载系统的 libpipewire-0.3，并通过
+# xdg-desktop-portal 的 ScreenCast 接口采集屏幕（见 README「Wayland 屏幕共享」）。
+Requires:       pipewire-libs
+Requires:       xdg-desktop-portal
 
 Recommends:     desktop-file-utils
 Recommends:     gtk-update-icon-cache
 Recommends:     xdg-utils
+Recommends:     xdg-desktop-portal-gnome
+Recommends:     xdg-desktop-portal-gtk
 
 %description
 腾讯会议（Tencent Meeting / Wemeet）是腾讯推出的云视频会议客户端。本包由官方
@@ -60,6 +68,14 @@ tar -xf %{SOURCE1} -C .
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a payload/. %{buildroot}/
+
+# Wayland 屏幕共享修复（仅 Hunk 0，不改颜色格式）：
+# 修复 libscreen_share_module.so 在 xdg-desktop-portal ScreenCast 流程中
+# Start 未等待 SelectSources Response 的 D-Bus 异步竞态。详见
+# rpm-packaging/patches/ 与 README。若遇到未知版本（字节不匹配）会告警并跳过，
+# 不会中断构建。
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: 需要 python3 来应用屏幕共享补丁" >&2; exit 1; }
+python3 patches/wemeet-dbus-race-fix.py "%{buildroot}%{wm_appdir}"
 
 # Ported maintainer scripts (Debian control scripts -> RPM helpers).
 install -d %{buildroot}%{_libexecdir}/wemeet
