@@ -60,21 +60,23 @@ https://atrustcdn.sangfor.com/standard/linux/2.5.16.30/ubuntu/amd64/aTrustInstal
 
 ## GitHub Actions 自动构建
 
-工作流 `.github/workflows/build-rpm.yml`：
+本包已并入单仓多包（monorepo）结构，工作流统一放在**仓库根目录**
+`.github/workflows/build-rpm.yml`（不在本目录内）：
 
-- **push 到 main/master 且 `version` 文件有变化** → 自动构建。
-- **手动触发（Run workflow）** → 可勾选 `force_release` 强制重发，并可选择构建镜像
-  (`fedora_image`，默认 `fedora:latest`) 与发布标签 (`dist_tag`，如 `.fc45` / `none` / 留空)。
+- **push 到 main/master** 且本包的 `version` / `rpm-packaging/**` / `build-rpm.sh`
+  （或工作流本身）发生变化 → 自动构建本包。
+- **手动触发（Run workflow）** → 选择 `package`（可为 `atrust` 或 `all`），可勾选
+  `force_release` 强制重发，并可选择构建镜像 (`fedora_image`，默认 `fedora:latest`)
+  与发布标签 (`dist_tag`，如 `.fc45` / `none` / 留空)。
 - 从 `version` 下载 deb 后统一命名为 `aTrustInstaller_<版本>_amd64.deb`。
-- **发布策略**：构建出的版本若已存在 `v<版本>` 的 Release，则**只上传 artifact、不重复发布**；
-  只有版本变化时才创建新 Release（tag 为 `v<版本>`，附带 RPM、deb 与校验和）。
+- **发布策略**：本包 Release 的 tag 为 `atrust-v<版本>`；若已存在对应 Release，则
+  **只上传 artifact、不重复发布**；只有版本变化时才创建新 Release。
 - 构建后会用 `dnf install --setopt=tsflags=noscripts` 做依赖校验，确保依赖可解析。
 
-### 仓库目录结构
+### 目录结构（atrust 子目录）
 
 ```
-.
-├── .github/workflows/build-rpm.yml   # CI 工作流
+atrust/
 ├── version                           # deb 下载地址（改这里升级版本）
 ├── build-rpm.sh                      # 一键构建脚本
 ├── rpm-packaging/
@@ -82,6 +84,8 @@ https://atrustcdn.sangfor.com/standard/linux/2.5.16.30/ubuntu/amd64/aTrustInstal
 │   └── helpers/                      # 适配后的安装/卸载脚本
 └── README.md
 ```
+
+> CI 工作流见仓库根目录 `.github/workflows/build-rpm.yml`。
 
 
 ## 转换方式
