@@ -1,0 +1,15 @@
+# 构建产物（不入库）
+/rpmbuild/
+/dist/
+/*.rpm
+/*.src.rpm
+/SHA256SUMS.txt
+/VERSION
+/ARCH
+
+# 官方 deb（约 140MB，超过 GitHub 单文件 100MB 限制）
+# 默认忽略；如使用 Git LFS 托管，请执行: git lfs install && git add -f aTrustInstaller_amd64.deb
+*.deb
+
+# 构建日志
+*.log

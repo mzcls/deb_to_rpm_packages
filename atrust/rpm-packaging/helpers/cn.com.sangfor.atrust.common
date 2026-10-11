@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# 日志文件路径
+PROGRESS_LOG=/root/.aTrust/logs/aTrustInstallOut.log
+
+Log()
+{
+	#参数处理
+	if [ $# -lt 2 ]; then
+		return 0
+	fi
+	LOG_LEV=$1
+	LOG_FMT=$2
+	shift 2
+
+	if [ ! -f $PROGRESS_LOG ]
+	then
+		local log_dir=""
+		log_dir=$(dirname $PROGRESS_LOG)
+		if [ ! -d "$log_dir" ]
+		then
+				mkdir -p "$log_dir"
+		fi
+	fi
+
+  if [ "$LOG_LEV" = "Error" ]; then
+    echo -e "\033[31;1m[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT} $*\033[0m"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT}" "$@" >> ${PROGRESS_LOG}
+  elif [ "$LOG_LEV" = "Infor" ]; then
+    echo -e "\033[32;1m[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT} $*\033[0m"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT}" "$@" >> ${PROGRESS_LOG}
+  elif [ "$LOG_LEV" = "Warning" ]; then
+    echo -e "\033[33;1m[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT} $*\033[0m"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT}" "$@" >> ${PROGRESS_LOG}
+  fi
+}
+
+#获取当前pc登录用户名,排除root用户
+#标准输出当前用户名
+#返回值：0 正常，1 没有找到
+get_current_login_name() {
+
+  local user_name=""
+  local user_uid=""
+	declare -A property
+	for session in $(loginctl --no-legend list-sessions | awk '{ print $1 }' ); do
+
+		while IFS="=" read key value ; do
+			property[${key}]="${value}"
+		done < <(loginctl show-session "${session}")
+
+		if [ "${property[Type]}" = "x11" ] || [ "${property[Type]}" = "wayland" ]; then
+			if [ "${property[Active]}" = "yes" ];then
+        user_uid=${property[User]}
+        user_name=$(id -nu "${user_uid}")
+				break;
+			fi
+		fi
+	done
+
+  if [ "${user_name}" == "" ]; then
+    echo ""
+    return 1
+  fi
+
+  echo "${user_name}"
+  return 0
+}
+
+## @fn log_util()
+## @brief "value" property specific option-setting hook.
+## @param LOG_LEV "Error" or "Infor"
+## @param LOG_FILE equal "None" means not output to file,otherwise output to file
+## @param FILE_NAME means call function's file name
+## @param LOG_FMT means call function's file name
+## @ingroup ArgsparseOptionSetter
+function log_util()
+{
+	# parameters number less than 4,we will quit it
+	if [ $# -lt 4 ]; then
+		return 0
+	fi
+	local LOG_LEV=$1
+	local LOG_FILE=$2
+	local FILE_NAME=$3
+	local LOG_FMT=$4
+	shift 4
+
+	# judge whether output to file or not
+	if [[ $LOG_FILE !=  "None" ]]; then
+		if [ ! -f "$LOG_FILE" ]
+		then
+			local log_dir=""
+			log_dir=$(dirname "$LOG_FILE")
+			if [ ! -d "$log_dir" ]
+			then
+				mkdir -p "$log_dir"
+			fi
+		fi
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] [$FILE_NAME] ${LOG_FMT}" "$@" >> $LOG_FILE
+	fi
+
+	# output to standard stream
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] [$FILE_NAME] ${LOG_FMT} $*"
+}

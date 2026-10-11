@@ -1,0 +1,245 @@
+#!/bin/bash
+
+## 处理aTrust需要的文件及文件夹
+
+## 处理aTrust需要的文件及文件夹
+PACKAGE_NAME='cn.com.sangfor.atrust'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=/var/lib/dpkg/info/cn.com.sangfor.atrust.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+THIS_FILE_NAME=$(basename $0)
+THIS_LOG_FILE="/root/.aTrust/logs/aTrustInstallOut.log"
+
+function my_log
+{
+  if [ $# -lt 2 ]; then
+    return 0
+  fi
+  Log "${1}" "${2}"
+}
+
+function create_dir()
+{
+    dest_dir=$1
+    if [ ! -e "${dest_dir}" ]; then
+      my_log "Infor" "not exist ${dest_dir},so we will create it"
+      my_log "Infor" "mkdir -p ${dest_dir}"
+      mkdir -p "${dest_dir}"
+    fi
+}
+
+function change_own_permission()
+{
+    local dest="${1}"
+    if [ -e "${dest:?}" ]; then
+        my_log "Infor" "chown -R ${dest}"
+        chown -R root:root "${dest}"
+        my_log "Infor" "chmod -R 777 ${dest}"
+        chmod -R 777 "${dest}"
+    fi
+}
+
+function ensure_database_file()
+{
+    local db_dir="/usr/share/sangfor/.aTrust/database"
+    if [ -d "${db_dir}" ]; then
+        my_log "Infor" "exist ${db_dir},so we will not create it"
+    else
+        my_log "Infor" "not exist ${db_dir},so we will create it"
+        mkdir -p "${db_dir}"
+    fi
+}
+
+function clear_shared_dir()
+{
+
+    my_log "Infor" "#################################### clear_shared_dir begin #########################################"
+
+    local root_dir="/usr/share/sangfor/.aTrust"
+    local b_exist_root_dir=1
+    if [ ! -e "${root_dir}" ]; then
+        b_exist_root_dir=0
+        mkdir -p "${root_dir}"
+    fi
+    local dirs=""
+    dirs=$(ls -a "${root_dir}")
+
+    # 目前 如下文件不能被清除，否则覆盖安装就需要重新登录了
+    # /usr/share/sangfor/.aTrust/database
+    # /usr/share/sangfor/.aTrust/iddbase
+    # /usr/share/sangfor/.aTrust/Cookies.txt
+    # /usr/share/sangfor/.aTrust/TunnelSharedConfig.db
+    # /usr/share/sangfor/.aTrust/TunnelSharedConfig.db.crc
+    # /usr/share/sangfor/.aTrust/.soft 存储持久化的UUID不能够被删除
+    mv "${root_dir}/var/conf/aioTrayEnable" "${root_dir}/"
+    local ignore_paths=("." ".." ".soft" "database" "iddbase"
+                        "Cookies.txt" "TunnelSharedConfig.db"
+                        "TunnelSharedConfig.db.crc" "tray_not_auto_launch" "aioTrayEnable" "var")
+                        #添加"aioTrayEnable"
+    for item in ${dirs}
+    do
+        if [[ "${ignore_paths[*]}"  =~ ${item} ]]; then
+            continue
+        fi
+
+        if [ -e "${root_dir}/${item}" ] ; then
+            my_log "Infor" "rm -rf " "${root_dir}/${item}"
+            rm -rf "${root_dir}/${item:?}"
+        fi
+    done
+
+    # 保留下disableDomain2IPV6标记用于兼容低版本服务器
+    local var_dir=""
+    var_dir="${root_dir}/var"
+    find "${var_dir}" -type f ! -name disableDomain2IPv6 -delete -print
+
+    # 重新创建如下文件夹
+    mkdir -p "${root_dir}/bin"
+    mkdir -p "${root_dir}/tmp"
+    mkdir -p "${root_dir}/var/run"
+    mkdir -p "${root_dir}/Crash"
+    mkdir -p "${root_dir}/iddbase"
+    mkdir -p "${root_dir}/var/conf"
+    # 创建进程单实例文件
+    touch "${root_dir}/sapp-aTrustAgent-b269-lockfile"
+    touch "${root_dir}/sapp-aTrustAgent_plugin-daemon-b49a-lockfile"
+    touch "${root_dir}/sapp-aTrustAgent_plugins_aTrustCore_h_e-5c4f-lockfile"
+    touch "${root_dir}/sapp-aTrustAgent_plugins_aTrustTunnel-f282-lockfile"
+    touch "${root_dir}/Globalatrustdb_lock_atrust.spa"
+    touch "${root_dir}/Globalatrustdb_lock_private.dns"
+    touch "${root_dir}/Globalatrustdb_lock_tunnel.access2"
+    touch "${root_dir}/Globalatrustdb_lock_TunnelSharedConfig"
+    touch "${root_dir}/GlobalDeviceIdLock"
+    touch "${root_dir}/GlobalSdpUserLogin"
+    mv "${root_dir}/aioTrayEnable" "${root_dir}/var/conf/aioTrayEnable"
+    # 创建并写入初值至端口文件
+    my_log "Infor" "echo 54630 > ${root_dir}/var/run/httpserver"
+    echo -n "54630" > "${root_dir}/var/run/httpserver"
+
+    my_log "Infor" "echo 55630 > ${root_dir}/var/run/eventbus"
+    echo -n "55630" > "${root_dir}/var/run/eventbus"
+
+    mkdir -p "${root_dir}/var/run/plugin-daemon"
+    my_log "Infor" "echo 56630 > ${root_dir}/var/run/plugin-daemon"
+    echo -n "56630" > "${root_dir}/var/run/plugin-daemon/thrift"
+
+    mkdir -p "${root_dir}/var/run/plugins/aTrustCore"
+    my_log "Infor" "echo 56641 > ${root_dir}/var/run/plugins/aTrustCore/thrift"
+    echo -n "56641" > "${root_dir}/var/run/plugins/aTrustCore/thrift"
+
+    mkdir -p "${root_dir}/var/run/plugins/aTrustTunnel"
+    my_log "Infor" "echo 56630 > ${root_dir}/var/run/plugins/aTrustTunnel/thrift"
+    echo -n "56652" > "${root_dir}/var/run/plugins/aTrustTunnel/thrift"
+
+    # ensure data file
+    ensure_database_file
+    # 单独对根目录提权 777
+    chmod 777 "${root_dir}"
+
+    # change agent process data shared directory permission
+    if [[ ${b_exist_root_dir} == 0 ]];then
+        my_log "Infor" "${root_dir} not exist,so we clear all permission"
+        change_own_permission "${root_dir}"
+    else
+        my_log "Infor" "${root_dir} exist,so we change partial permission"
+
+        change_own_permission "${root_dir}/sapp-aTrustAgent-b269-lockfile"
+        change_own_permission "${root_dir}/sapp-aTrustAgent_plugin-daemon-b49a-lockfile"
+        change_own_permission "${root_dir}/sapp-aTrustAgent_plugins_aTrustCore_h_e-5c4f-lockfile"
+        change_own_permission "${root_dir}/sapp-aTrustAgent_plugins_aTrustTunnel-f282-lockfile"
+        change_own_permission "${root_dir}/Globalatrustdb_lock_atrust.spa"
+        change_own_permission "${root_dir}/Globalatrustdb_lock_private.dns"
+        change_own_permission "${root_dir}/Globalatrustdb_lock_tunnel.access2"
+        change_own_permission "${root_dir}/Globalatrustdb_lock_TunnelSharedConfig"
+        change_own_permission "${root_dir}/GlobalDeviceIdLock"
+        change_own_permission "${root_dir}/GlobalSdpUserLogin"
+        change_own_permission "${root_dir}/Crash"
+        change_own_permission "${root_dir}/var/run"
+        change_own_permission "${root_dir}/var/database"
+    fi
+
+    # change database directory permission
+    change_own_permission "${root_dir}/database"
+    change_own_permission "${root_dir}/iddbase"
+
+    my_log "Infor" "#################################### clear_shared_dir end #########################################"
+}
+
+function change_permission() {
+
+    my_log "Infor" "#################################### allocate permission begin #########################################"
+
+    # change root user permission
+    local atrust_root_app_dir="/root/.aTrust"
+    if [ ! -e "${atrust_root_app_dir}/logs" ]; then
+      my_log "Infor" "not exist root app logs dir,so we will create it"
+      local atrust_root_logs_dir="${atrust_root_app_dir}/logs"
+      my_log "Infor" "mkdir -p ${atrust_root_logs_dir}"
+      mkdir -p "${atrust_root_logs_dir}"
+    fi
+    my_log "Infor" "chmod -R 755 ${atrust_root_app_dir}"
+    chmod -R 755 "${atrust_root_app_dir}"
+
+    my_log "Infor" "#################################### allocate permission end #########################################"
+}
+
+function migration_mmkv_database() {
+
+    my_log "Infor" "#################################### migration mmkv begin #########################################"
+
+    local username
+    if ! username=$(get_current_login_name); then
+      my_log "Error" "get username:(${username}) failed, please check this device support loginctl?"
+      exit 1
+    fi
+
+    local userUid
+    if ! userUid=$(id -u "${username}");then
+      my_log "Error" "get userUid:(${userUid}) failed, please check passwd file?"
+      exit 1
+    fi
+    my_log "Infor" "users:${USER},${LOGNAME},${username}; userid:${userUid}"
+    #获取当前用户的家目录
+    local home_dir
+    home_dir=$(getent passwd "${userUid}" |awk -F ":" '{print $6}')
+
+    local src_path="${home_dir}/.aTrust/iddbase/sdp-8cbbff18-1936-45a6-8c3e-467a35e1811b"
+    local dest_path="/usr/share/sangfor/.aTrust/iddbase/sdp-8cbbff18-1936-45a6-8c3e-467a35e1811b"
+    if [ -f "${src_path}" ] && [ ! -f "${dest_path}" ]; then
+
+        my_log "Infor" "cp -rf ${src_path} ${dest_path}"
+        cp -rf "${src_path}" "${dest_path}"
+    fi
+    change_own_permission "${dest_path}"
+
+    local crc_src_path="${home_dir}/.aTrust/iddbase/sdp-8cbbff18-1936-45a6-8c3e-467a35e1811b.crc"
+    local crc_dest_path="/usr/share/sangfor/.aTrust/iddbase/sdp-8cbbff18-1936-45a6-8c3e-467a35e1811b.crc"
+    if [ -f "${crc_src_path}" ] && [ ! -f "${crc_dest_path}" ]; then
+
+        my_log "Infor" "cp -rf ${crc_src_path} ${crc_dest_path}"
+        cp -rf "${crc_src_path}" "${crc_dest_path}"
+    fi
+    change_own_permission "${crc_dest_path}"
+
+    my_log "Infor" "#################################### migration mmkv end #########################################"
+}
+
+function main()
+{
+    #处理共享目录
+    clear_shared_dir
+
+    #修改目录权限
+    change_permission
+
+    #合并mmkv数据库
+    if  ! username=$(get_current_login_name); then
+        my_log "Error" "get username:(${username}) failed, may device not support loginctl or can not get user when Installed， will not migration_mmkv_database"
+    else
+        migration_mmkv_database
+    fi
+}
+
+main
+
+exit 0

@@ -1,0 +1,780 @@
+#!/bin/bash
+
+## 安装--解压后钩子调用脚本 (RPM 适配版)
+## 由官方 .deb 的 control/postinst 移植而来，用于 Fedora/RHEL 等 RPM 发行版。
+
+echo "all argv $*"
+# 日志文件路径
+LOG_PATH="/root/.aTrust/logs/aTrustInstallOut.log"
+# 安装包文件名
+package_file_name=''
+# 当前pc登录用户名和用户的UID
+username=''
+userUid=''
+export LANG=${LANG:-"zh_CN.UTF-8"}
+export LANGUAGE=${LANGUAGE:-"zh_CN"}
+# 安装包名
+PACKAGE_NAME='cn.com.sangfor.atrust'
+# 获取当前目录
+SCRIPT_PATH=$(dirname "$0")
+SYSTEM_TYPE=''
+SYSTEM_VERSION_ID=''
+home_dir=''
+CPU_MODEL_NAME_REQUIRED="Kirin[^0-9]*(990|9006C)"
+progress_file="/tmp/progress_file"
+
+# shellcheck source=cn.com.sangfor.atrust.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+ATRUST_PATH="/usr/share/sangfor/aTrust"
+ATRUST_RESOURCES_PATH="${ATRUST_PATH}/resources"
+SHELL_PATH="/usr/share/sangfor/aTrust/resources/shell"
+IS_LITE="NO"
+if [ ! -e "/usr/share/sangfor/aTrust/aTrustTray" ]; then
+  Log "Infor" "current package is lite package"
+  IS_LITE="YES"
+fi
+
+## 比较版本号  0 相等 1 第一个比第二个大 2 第一个比第二个小
+## 不支持参数中含有换行
+function version_comp() {
+    if [[ $# -lt 2 ]]; then
+        return 1
+    fi
+
+    if [[ "$1" == "$2" ]]; then
+        return 0
+    fi
+
+    if [[ "$1" == "$(echo -e "$1\n$2" | sort -V -b | head -n 1)" ]]; then
+        return 2
+    else
+        return 1
+    fi
+}
+
+# 删除内置的c++库，防止由于c++库版本比较低导致无法运行
+# 原 deb 使用 dpkg-query 查询 libstdc++6 版本，这里改为读取系统 libstdc++ 的
+# 最高 GLIBCXX 符号版本（GLIBCXX_3.4.25 对应 GCC 8.3）。
+function delete_std_c6() {
+  local stdc6_path=""
+  stdc6_path="$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6 /{print $NF; exit}')"
+  if [ -z "${stdc6_path}" ]; then
+    if [ -e /usr/lib64/libstdc++.so.6 ]; then
+      stdc6_path="/usr/lib64/libstdc++.so.6"
+    fi
+  fi
+
+  local stdc6_version=""
+  if [ -n "${stdc6_path}" ] && [ -e "${stdc6_path}" ]; then
+    stdc6_version="$(strings "${stdc6_path}" 2>/dev/null | grep -oE 'GLIBCXX_[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 | sed 's/GLIBCXX_//')"
+  fi
+
+  if [ -z "${stdc6_version}" ]; then
+    Log "Infor" "can not detect system libstdc++ version, keep bundled libstdc++.so.6"
+    return
+  fi
+
+  version_comp "${stdc6_version}" "3.4.25"
+  ret=$?
+  if [ $ret == 1 ]; then
+    Log "Infor" "libstdc++ in system is ${stdc6_version}, higher than 3.4.25(GCC8.3), will delete lib in package."
+    rm -f /usr/share/sangfor/aTrust/resources/lib/libstdc++.so.6
+  else
+    Log "Infor" "libstdc++ in system is ${stdc6_version}, keep bundled libstdc++.so.6"
+  fi
+}
+
+#获取当前pc登录用户名
+get_login_info() {
+
+  Log "Infor" "postinst start get login name..."
+
+  if ! username=$(get_current_login_name); then
+    Log "Error" "install can't get pc login name:${username}, can't install..."
+    exit 1
+  fi
+
+  if ! userUid=$(id -u "${username}");then
+    Log "Error" "install can't get pc login uid:${userUid}, can't install..."
+    exit 1
+  fi
+
+  Log "Infor" "postinst end get login name:${username}, uid:${userUid}..."
+}
+
+#获取安装包包名
+#RPM 环境下没有 dpkg 的父进程，改为在父进程链中查找 .rpm/.deb 文件；
+#找不到也不影响安装（仅影响从文件名解析 SPA/地址的定制安装包）。
+get_package_file_name() {
+
+  Log "Infor" "postinst start get atrust installer name..."
+
+  # %pre 阶段记录的安装包路径优先
+  if [ -s /tmp/.atrust_rpm_name ]; then
+    local recorded=""
+    recorded=$(cat /tmp/.atrust_rpm_name 2>/dev/null)
+    if [ -n "${recorded}" ] && [ -e "${recorded}" ]; then
+      package_file_name=$(basename "${recorded}")
+      Log "Infor" "postinst end get atrust installer name:${package_file_name}..."
+      return
+    fi
+  fi
+
+  local cmd_line=""
+  cmd_line=$(ps p $PPID h 2>/dev/null | awk '{ if ($NF ~ /^[\(\（]/) print $(NF-1); else print $NF }')
+  Log "Infor" "get cmdline:${cmd_line}"
+
+  if [ "${cmd_line}" == "" ] || [ ! -e "${cmd_line}" ]; then
+    local p=$PPID
+    local i=""
+    local cl=""
+    local tok=""
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      [ -z "${p}" ] && break
+      cl=$(tr '\0' ' ' < "/proc/${p}/cmdline" 2>/dev/null)
+      for tok in ${cl}; do
+        case "${tok}" in
+          *.rpm | *.deb)
+            if [ -e "${tok}" ]; then
+              cmd_line="${tok}"
+            fi
+            ;;
+        esac
+      done
+      [ -n "${cmd_line}" ] && break
+      p=$(ps -o ppid= -p "${p}" 2>/dev/null | tr -d ' ')
+    done
+  fi
+
+  if [ -n "${cmd_line}" ] && [ -e "${cmd_line}" ]; then
+    package_file_name=$(basename "$cmd_line")
+  fi
+
+  if [ "${package_file_name}" == "" ]; then
+    # 兜底：不阻塞安装
+    package_file_name="aTrustInstaller_amd64.rpm"
+    Log "Infor" "can not get atrust installer path from process tree, use default name:${package_file_name}"
+  fi
+  Log "Infor" "postinst end get atrust installer name:${package_file_name}..."
+}
+
+#系统判断,优先 os-release，lsb_release 作为兼容
+detect_distro() {
+
+  Log "Infor" "postinst start system detect..."
+
+  local distro=""
+  if command -v lsb_release >/dev/null 2>&1; then
+    distro=$(lsb_release -i 2>/dev/null | cut -f2)
+    SYSTEM_VERSION_ID=$(lsb_release -r 2>/dev/null | cut -f2)
+  fi
+
+  if [ -z "${distro}" ] && [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    distro=$(. /etc/os-release && echo "${ID:-}")
+    SYSTEM_VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID:-}")
+  fi
+
+  case "${distro}" in
+  ubuntu | Ubuntu | UBUNTU)
+    RELEASE_TYPE=ubuntu
+    SYSTEM_TYPE=ubuntu
+    ;;
+  *)
+    RELEASE_TYPE=unkown
+    SYSTEM_TYPE=unknow
+    ;;
+  esac
+
+  Log "Infor" "postinst end system detect with type:${RELEASE_TYPE},version:${SYSTEM_VERSION_ID}..."
+}
+
+#ubuntu15.04 之下版本系统服务处理函数
+upstart_add_service() {
+  return 0
+}
+
+#ubuntu15.04及之上  版本系统服务处理函数
+system_add_service() {
+  Log "Infor" "postinst start add atrust service..."
+
+  local atrust_desktop_file="/usr/share/applications/cn.com.sangfor.atrust.desktop"
+
+  {
+    systemctl daemon-reload
+    systemctl enable aTrustDaemon
+  } >> ${LOG_PATH} 2>&1
+
+  if [ "${RELEASE_TYPE}" = "ubuntu" ]; then
+    #解决Ubuntu1804任务栏图标显示异常的问题，对Ubuntu16没影响；deepin系统上不能加下面这句，会使图标异常，测试UOS上没问题
+    echo "StartupWMClass=aTrustTray" >> ${atrust_desktop_file}
+  else
+    # Fedora/RHEL 桌面(Wayland/GNOME)下同样需要 WMClass 以便任务栏归组
+    if [ -e "${atrust_desktop_file}" ] && ! grep -q '^StartupWMClass=' "${atrust_desktop_file}" 2>/dev/null; then
+      echo "StartupWMClass=aTrustTray" >> ${atrust_desktop_file}
+    fi
+  fi
+
+  Log "Infor" "postinst end add atrust service..."
+}
+
+system_start_service() {
+  Log "Infor" "postinst start start atrust service..."
+
+  {
+    systemctl start aTrustDaemon
+  } >> ${LOG_PATH} 2>&1
+
+  if  ! username=$(get_current_login_name); then
+      Log "Error" "get username:(${username}) failed, may device not support loginctl or can not get user when Installed, will not start tray"
+  else
+
+      local user_uid
+      user_uid=$(id -u "${username}")
+      export XDG_RUNTIME_DIR="/run/user/${user_uid}"
+      Log "Infor" "current XDG_RUNTIME_DIR:${XDG_RUNTIME_DIR} after"
+
+      local arch
+      arch=$(uname -m)
+
+      if [ "${arch}" == "loongarch64" ]; then
+        runuser -u "${username}" -- env XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" systemctl --user start aTrustTray >> ${LOG_PATH} 2>&1
+      else
+        # RPM 环境通常没有 sudo（或不可用），优先使用 util-linux 的 runuser
+        if command -v runuser >/dev/null 2>&1; then
+          runuser -u "${username}" -- /usr/share/sangfor/aTrust/resources/shell/aTrustTrayStart.sh -- -s installedstart >> ${LOG_PATH} 2>&1
+        elif command -v sudo >/dev/null 2>&1; then
+          sudo -u "${username}" /usr/share/sangfor/aTrust/resources/shell/aTrustTrayStart.sh -- -s installedstart >> ${LOG_PATH} 2>&1
+        else
+          Log "Error" "neither runuser nor sudo found, will not start tray"
+        fi
+      fi
+  fi
+  Log "Infor" "postinst end start atrust service..."
+}
+
+#这里面现在只处理ubuntu的情况，其他情况默认使用system方式
+add_service() {
+
+  if [ "${RELEASE_TYPE}" = "ubuntu" ]; then
+
+    VERSION_YEA=$(echo "$SYSTEM_VERSION_ID" | awk -F "." '{print$1}')
+    #低于ubuntu15.04
+    if [ "${VERSION_YEA}" -lt "15" ] 2>/dev/null; then
+      upstart_add_service
+    else
+      system_add_service
+    fi
+  else
+    system_add_service
+  fi
+}
+
+start_service() {
+
+  if [ "${RELEASE_TYPE}" = "ubuntu" ]; then
+
+    VERSION_YEA=$(echo "$SYSTEM_VERSION_ID" | awk -F "." '{print$1}')
+    #低于ubuntu15.04
+    if [ "${VERSION_YEA}" -lt "15" ] 2>/dev/null; then
+      upstart_start_service
+    else
+      system_start_service
+    fi
+  else
+    system_start_service
+  fi
+}
+
+#spa,sdpc地址处理
+linux_helper() {
+
+  Log "Infor" "postinst start parse info..."
+
+  local atrust_share_path="/usr/share/sangfor/.aTrust"
+  local atrust_root_path="/root/.aTrust"
+  # 添加本地host
+  /usr/share/sangfor/aTrust/resources/bin/linuxHelper -ah "127.0.0.1" "localhost.sangfor.com.cn"
+  # 存储sdpc地址信息
+  mkdir -p "${atrust_share_path}/var/conf"
+  if [ "${IS_LITE}" == "NO" ]; then
+    /usr/share/sangfor/aTrust/resources/bin/linuxHelper -r "${package_file_name}" ${atrust_share_path}/var/conf/addr.conf
+    /usr/share/sangfor/aTrust/resources/bin/linuxHelper -r "${package_file_name}" ${atrust_share_path}/var/conf/installAddr.conf
+
+    # 存储spa种子信息---home目录
+    /usr/share/sangfor/aTrust/resources/bin/linuxHelper -s "${package_file_name}" "${atrust_share_path}"/var/conf/aTrustInstaller_name.txt
+    # 判断spa种子有效期
+    if ! /usr/share/sangfor/aTrust/resources/bin/linuxHelper -v "${atrust_share_path}"/var/conf/aTrustInstaller_name.txt ; then
+        if [  -d "${atrust_home_path}" ]; then
+             rm -rf "${atrust_home_path}"
+        fi
+
+        if [  -d "${atrust_share_path}" ]; then
+             rm -rf "${atrust_share_path}"
+        fi
+
+        if [  -d "${atrust_root_path}" ]; then
+             rm -rf "${atrust_root_path}"
+        fi
+
+        if [  -d "${ATRUST_PATH}" ]; then
+             rm -rf "${ATRUST_PATH}"
+        fi
+
+        if [  -d "${LOG_PATH}" ]; then
+             rm -rf "${LOG_PATH}"
+        fi
+        Log "Error" "Spa seed is out of time ,then will exit"
+        exit 1
+    fi
+    # 存储托盘自定义主题名称
+    CLIENT_DESKTOP_NAME=$(/usr/share/sangfor/aTrust/resources/bin/linuxHelper -etn "${package_file_name}" ${atrust_share_path}/var/run/TrayTheme/theme.json)
+    if [ "${CLIENT_DESKTOP_NAME}" != "" ]; then
+      local atrust_desktop_file="/opt/apps/cn.com.sangfor.atrust/entries/applications/cn.com.sangfor.atrust.desktop"
+      local replace_name="Name[zh_CN]=${CLIENT_DESKTOP_NAME}"
+      sed -i "s/Name\[zh_CN\]=aTrust/${replace_name}/g" "${atrust_desktop_file}"
+      Log "Infor" "will change cn.com.sangfor.atrust.desktop name to ${CLIENT_DESKTOP_NAME}"
+    fi
+
+    ln -sf "${atrust_desktop_file}" /usr/share/applications/cn.com.sangfor.atrust.desktop
+    if [ -f /tmp/aTrustInstaller_key.txt ]; then
+      cp -f /tmp/aTrustInstaller_key.txt "${atrust_share_path}"/var/conf/
+    fi
+
+    # 存储spa种子信息---root目录
+    mkdir -p "${atrust_root_path}/var/conf"
+    /usr/share/sangfor/aTrust/resources/bin/linuxHelper -s "${package_file_name}" ${atrust_root_path}/var/conf/aTrustInstaller_name.txt
+    # 存储托盘自定义主题名称
+    /usr/share/sangfor/aTrust/resources/bin/linuxHelper -etn "${package_file_name}" ${atrust_share_path}/var/run/TrayTheme/theme.json
+  fi
+  if [ -f /tmp/aTrustInstaller_key.txt ]; then
+    cp -f /tmp/aTrustInstaller_key.txt ${atrust_root_path}/var/conf/
+  fi
+
+  chown -R root:root "${atrust_root_path}/var" 2>/dev/null
+  chmod -R 777 "${atrust_share_path}/var" 2>/dev/null
+  chmod -R 755 "${atrust_root_path}/var" 2>/dev/null
+  # 修改目录权限，方便提权目录拷贝web文件
+  chmod -R 777 "/usr/share/sangfor/aTrust/resources/app" 2>/dev/null
+
+  Log "Infor" "postinst end parse info..."
+
+}
+
+#更改文件权限
+change_authority() {
+
+  Log "Infor" "postinst start change authority..."
+
+  #修改权限
+  chmod -R 755 "${ATRUST_PATH}"
+  chmod 755 /root
+  #更改所有者
+  chown -R root:root "${ATRUST_PATH}"
+  local service_base_path="/usr/lib/systemd"
+  local need_changes=(
+                      "${service_base_path}/user/aTrustShell.service"
+                      "${service_base_path}/system/aTrustDaemon.service"
+                      )
+  for need_change in ${need_changes[*]} ; do
+      chown -R root:root "${need_change}"
+  done
+  #更改桌面图片和自启动的所有者
+  local atrust_desktop_file="/usr/share/applications/cn.com.sangfor.atrust.desktop"
+  if [ -e "${atrust_desktop_file}" ]; then
+    chown -h root:root "${atrust_desktop_file}" 2>/dev/null
+    chmod 644 "${atrust_desktop_file}" 2>/dev/null
+  fi
+
+  Log "Infor" "postinst end change authority..."
+}
+
+#更改UEM文件权限
+change_uem_authority() {
+  Log "Infor" "postinst start change uem authority..."
+
+  local uem_installer="/usr/share/sangfor/aTrust/uem/bin/uem_installer"
+  if [ -f "${uem_installer}" ]; then
+    chown root:root "${uem_installer}"
+    chmod a+s "${uem_installer}"
+  fi
+
+  Log "Infor" "postinst end change uem authority..."
+}
+
+config_upgrade() {
+  # sqlite数据库配置转换, 目前linux的数据库目录是固定的,转换失败不影响安装
+  local atrust_share_path="/usr/share/sangfor/.aTrust"
+  Log "Infor" "upgrade database config for dir: ${atrust_share_path}/database"
+  Log "Infor" "${ATRUST_RESOURCES_PATH}/bin/ConfigUpgrade -d ${atrust_share_path}/database"
+  ${ATRUST_RESOURCES_PATH}/bin/ConfigUpgrade -d "${atrust_share_path}/database" -a ${atrust_share_path}/var/conf/installAddr.conf
+  ret=$?
+  if [ $ret -ne 0 ]; then
+    if ! ${ATRUST_RESOURCES_PATH}/bin/ConfigUpgrade -d "${atrust_share_path}/database" -a ${atrust_share_path}/var/conf/installAddr.conf; then
+       Log "Error" "do ConfigUpgrade fail!, will exit."
+       exit 1
+    fi
+  fi
+  Log "Infor" "upgrade database config done"
+}
+
+#修改非 x86/arm 架构下的 desktop(添加库路径)
+modify_desktop() {
+  arch=$(uname -m)
+  if [[ "$arch" =~ ^(x86_64|amd64|aarch64|arm64)$ ]]; then
+    Log "Infor" "skip modify desktop"
+    return 0
+  fi
+  local array_desktop=("/usr/share/applications/cn.com.sangfor.atrust.desktop" "/opt/apps/cn.com.sangfor.atrust/entries/applications/cn.com.sangfor.atrust.desktop")
+  for desktop in ${array_desktop[*]} ; do
+    # 添加env
+    sed -i 's/Exec=/Exec=env LD_LIBRARY_PATH=\/usr\/share\/sangfor\/aTrust\/resources\/bin QT_QPA_PLATFORM_PLUGIN_PATH=\/usr\/share\/sangfor\/aTrust\/resources\/lib /g' "${desktop}"
+  done
+}
+
+get_child_lang() {
+  local parent_pid=$1
+  local child_pids=$(ps --ppid "$parent_pid" --no-headers -o pid)
+
+  for child_pid in $child_pids; do
+    local environ_file="/proc/$child_pid/environ"
+    if [ -f "$environ_file" ]; then
+      local lang_value=$(tr '\0' '\n' < "$environ_file" | awk -F '=' '/^LANG=/ {print $2}')
+      if [ -n "$lang_value" ]; then
+        echo "$lang_value"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+#遍历session导入环境变量
+export_envs() {
+
+  Log "Infor" "${FILE_NAME} export envs start..."
+
+  local user_uid=""
+  local display_id=""
+  local leader_pid=""
+  declare -A property
+  for session in $(loginctl --no-legend list-sessions | awk '{ print $1 }' ); do
+
+      while IFS="=" read key value ; do
+          property[${key}]="${value}"
+      done < <(loginctl show-session "${session}")
+
+      if [ "${property[Type]}" = "x11" ] || [ "${property[Type]}" = "wayland" ]; then
+
+          if [ "${property[Active]}" = "yes" ];then
+              user_uid=${property[User]}
+              display_id=${property[Display]}
+              leader_pid=${property[Leader]}
+              break;
+          fi
+      fi
+  done
+
+  if [ "${display_id}" == "" ]; then
+        Log "Infor" "${FILE_NAME} get dispaly_id: ${dispaly_id} error..., will use :0 as default"
+        display_id=":0"
+  fi
+
+  if [ "${user_uid}" == "" ]; then
+    Log "Error" "${FILE_NAME} get user_uid: ${user_uid} error..."
+    return 1
+  fi
+
+  if [ "${leader_pid}" == "" ]; then
+      Log "Error" "${FILE_NAME} get leader_pid: ${leader_pid} error..."
+      return 1
+  fi
+
+  local lang_value=$(get_child_lang "${leader_pid}")
+  Log "Infor" "${FILE_NAME}, leader_pid:${leader_pid} LANG env in child process, LANG: ${lang_value}"
+
+  if [ -n "${lang_value}" ]; then
+      local UEM_SYS_LANG_FILE_PATH="/usr/share/sangfor/.aTrust/var/conf/sysLang"
+      local UEM_SYS_LANG_DIR="/usr/share/sangfor/.aTrust/var/conf"
+      mkdir -p ${UEM_SYS_LANG_DIR}
+      echo ${lang_value} > ${UEM_SYS_LANG_FILE_PATH}
+      export LANG=${lang_value}
+      Log "Infor" "${FILE_NAME}, set sys lang: ${lang_value}"
+  fi
+
+  local home_dir
+  home_dir=$(getent passwd ${user_uid} | awk -F ":" '{print $6}')
+
+  export DISPLAY=${display_id}
+  export XAUTHORITY="${home_dir}/.Xauthority"
+
+  Log "Infor" "Current LANG=${LANG} LANGUAGE=${LANGUAGE} DISPLAY=${DISPLAY} XAUTHORITY=${XAUTHORITY} HOME=${home_dir}"
+
+  Log "Infor" "${FILE_NAME} export envs end..."
+
+  return 0
+}
+
+check_need_install_vdi() {
+    if (grep -nr "NAME_EN=\"NFSDesktop\"" /etc/os-release >/dev/null 2>&1); then
+        Log "Infor" "in NFSDesktop , not install VDI"
+        return 1
+    fi
+
+    if [ ! -f ${SHELL_PATH}/vdi-linux-client-*.deb ];then
+        Log "Infor" "not exist vdi_deb, not install VDI"
+        return 1
+    fi
+
+    if [ -e "/usr/local/sangfor/vdiclient/bin/vdi_client" ]; then
+        Log "Infor" "vdi_client already exist, not install VDI again"
+        return 1
+    fi
+
+    return 0
+}
+
+# VDI的deb安装完成会调用install_depend安装更新
+check_vdi_install_depend() {
+  local vdi_install_depend_path="/etc/sangfor/vdiclient/install_depend.sh"
+  local max_attempts=10
+  local count=0
+  while [ $count -lt $max_attempts ]; do
+    sleep 1
+    if pgrep -f ${vdi_install_depend_path} > /dev/null; then
+      Log "Infor" "vdi install depend process exist, wait 1 second."
+    else
+      Log "Infor" "vdi install depend process not exist."
+      break
+    fi
+    count=$((count+1))
+  done
+}
+
+#重启弹框提示
+do_pop_tips() {
+  local UEM_DIALOG_PATH="/usr/share/sangfor/aTrust/uem/bin/uem_dialog"
+  if [ ! -e "${UEM_DIALOG_PATH}" ]; then
+      Log "Infor" "uem_dialog not exist, not pop tips"
+      return
+  fi
+
+  Log "Infor" "${FILE_NAME} do pop tips start..."
+  if check_need_install_vdi; then
+      Log "Infor" "need install vdi, check vdi is installing depend begin."
+      check_vdi_install_depend
+      Log "Infor" "need install vdi, check vdi is installing depend end."
+  fi
+
+  # 加载需要的环境变量
+  export_envs
+
+  if  ! username=$(get_current_login_name); then
+      Log "Error" "get username:(${username}) failed, may device not support loginctl or can not get user when Installed, will not pop up reboot dialog"
+  else
+      userUid=$(id -u "${username}")
+      "${UEM_DIALOG_PATH}" --type 2 -p $PPID -u "${userUid}" >> ${LOG_PATH} 2>&1 &
+  fi
+  Log "Infor" "${FILE_NAME} do pop tips end..."
+}
+
+install_vdi(){
+  if check_need_install_vdi; then
+      Log "Infor" "need install vdi, install vdi..."
+      # RPM 系统没有 dpkg，无法安装 deb 形式的 VDI 客户端
+      if command -v dpkg >/dev/null 2>&1; then
+        /usr/share/sangfor/aTrust/resources/shell/install_vdi.sh 1>/dev/null 2>&1
+      else
+        Log "Infor" "dpkg not found on this system, skip vdi deb installation"
+      fi
+  fi
+}
+
+config_dmidecode_tool(){
+  local dmidecode_tool_path="${ATRUST_RESOURCES_PATH}/bin/dmidecode_processor_tool"
+  if [ -f "${dmidecode_tool_path}" ]; then
+    Log "Infor" "config dmidecode tool"
+    chown root:root "${dmidecode_tool_path}"
+    chmod a+s "${dmidecode_tool_path}"
+  else
+    Log "Infor" "dmidecode tool ${dmidecode_tool_path} not exist"
+  fi
+}
+
+#安装中台
+setup_eaio_component() {
+  local arch
+  arch=$(uname -m)
+
+  if [ "${arch}" == "mips64" ] || [ "${arch}" == "loongarch64" ]; then
+    return
+  fi
+
+  if (grep -w Hardware /proc/cpuinfo | grep -E "${CPU_MODEL_NAME_REQUIRED}" >/dev/null 2>&1); then
+     Log "Infor" "in HUAWEI Kirin 990 Kirin 990C , not install AIO"
+     return
+  fi
+
+  if (grep -nr "NAME_EN=\"NFSDesktop\"" /etc/os-release >/dev/null 2>&1); then
+      Log "Infor" "in NFSDesktop , not install AIO"
+      return
+  fi
+
+  if [ -f "${SHELL_PATH}/EAIOC/eaio_packman" ]; then
+     Log "Infor" "install AIO begin"
+     if ! "${SHELL_PATH}/EAIOC/eaio_packman" -c "${SHELL_PATH}/EAIOC" ; then
+       Log "Error" "install AIO fail"
+     fi
+     Log "Infor" "install AIO end"
+  fi
+
+  touch "/usr/share/sangfor/.aTrust/var/conf/InstallLocation"
+  if [ -f "${SHELL_PATH}/EAIOC/eaio_packman" ]; then
+    Log "Infor" "register SDP to AIO begin"
+    if ! "${SHELL_PATH}/EAIOC/eaio_packman" -a SDP /usr/share/sangfor/.aTrust/var/conf/InstallLocation ; then
+      Log "Error" "register SDP to AIO fail"
+    fi
+    Log "Infor" "register SDP to AIO end"
+  fi
+}
+
+send_app_to_all_user_desktop() {
+  for user in $(/usr/bin/users); do
+    local home_dir
+    home_dir=$(getent passwd ${user} | awk -F ":" '{print $6}')
+    [ -z "${home_dir}" ] && continue
+    export HOME="${home_dir}"
+    local dirs_file_path
+    dirs_file_path="$HOME/.config/user-dirs.dirs"
+    local desktop_path=""
+    if [ -f "${dirs_file_path}" ]; then
+      desktop_path=$(awk -F'"' '/^XDG_DESKTOP_DIR/{print $2}' "${dirs_file_path}")
+      desktop_path=$(eval echo "${desktop_path}")
+    else
+      desktop_path="${HOME}/Desktop"
+    fi
+    [ -z "${desktop_path}" ] && continue
+    Log "Infor" "get ${user} desktop path ${desktop_path}"
+    local src_file
+    src_file="/usr/share/applications/cn.com.sangfor.atrust.desktop"
+    if [ -f "${src_file}" ] && [ -d "${desktop_path}" ]; then
+        cp -f ${src_file} ${desktop_path}
+        chown ${user}:${user} ${desktop_path}/cn.com.sangfor.atrust.desktop
+        if ! chmod 755 ${desktop_path}/cn.com.sangfor.atrust.desktop ; then
+           Log "Error" "chmod 755 ${desktop_path}/cn.com.sangfor.atrust.desktop failed"
+        fi
+        Log "Infor" "cp ${src_file} to ${desktop_path}"
+    else
+        Log "Infor" "${src_file} not exist or desktop dir ${desktop_path} not exist"
+    fi
+  done
+}
+
+setup_sangfor_cert() {
+    Log "Infor" "${FILE_NAME} start setup sangfor cert..."
+
+    local cert_src_path="/usr/share/sangfor/aTrust/resources/sangfor2024.crt"
+    # deepin 应用商店证书目录（官方 deb 行为）
+    local cert_dir="/usr/share/ca-certificates/deepin/internal_appstore"
+    if [ -d "${cert_dir}" ] && [ -f "${cert_src_path}" ]; then
+      cp -af "${cert_src_path}" "${cert_dir}/sangfor2024.crt"
+    fi
+
+    # Fedora/RHEL：写入系统信任库，保证本地 https://localhost.sangfor.com.cn 可被信任
+    if [ -d /etc/pki/ca-trust/source/anchors ] && [ -f "${cert_src_path}" ]; then
+      cp -af "${cert_src_path}" /etc/pki/ca-trust/source/anchors/sangfor2024.crt
+      if command -v update-ca-trust >/dev/null 2>&1; then
+        update-ca-trust >> ${LOG_PATH} 2>&1
+        Log "Infor" "sangfor cert installed to system trust store"
+      fi
+    fi
+
+    Log "Infor" "${FILE_NAME} end setup sangfor cert..."
+}
+
+#主函数入口
+main() {
+  Log "Infor" "postinst start..."
+
+  # 清理文件权限
+  Log "Infor" "bash ${SCRIPT_PATH}/${PACKAGE_NAME}.create_dir >> ${LOG_PATH} 2>&1"
+  if ! bash "${SCRIPT_PATH}/${PACKAGE_NAME}.create_dir" >> "${LOG_PATH}" 2>&1; then
+    Log "Error" "bash ${SCRIPT_PATH}/${PACKAGE_NAME}.create_dir failed"
+    exit 1
+  fi
+
+  # 配置深信服证书
+  setup_sangfor_cert
+
+  #如果是触发器事件则不往下执行(RPM 无此参数)
+  if [ "$1" = "triggered" ]; then
+    exit 0
+  fi
+
+  #判断系统信息
+  detect_distro
+  delete_std_c6
+  # 获取包名
+  echo "70" > ${progress_file}
+  if [ "${IS_LITE}" == "NO" ]; then
+    modify_desktop
+    get_package_file_name
+  fi
+  #更改相关文件路径
+  change_authority
+  change_uem_authority
+  #解析包名
+  linux_helper
+  if [ "${IS_LITE}" == "NO" ]; then
+    #app -> 桌面
+    send_app_to_all_user_desktop
+  fi
+  #执行配置转换
+  config_upgrade
+
+  # SPA域名支持IPV6
+  /usr/share/sangfor/aTrust/resources/bin/linuxHelper -edv6 "${package_file_name}"
+
+  #配置dmidecode工具
+  config_dmidecode_tool
+  if [ "${IS_LITE}" == "NO" ]; then
+    #安装中台
+    setup_eaio_component
+  fi
+
+  # 向麒麟V10 SP1 网络防控添加白名单
+   if (grep -nr "PRETTY_NAME=\"Kylin V10 SP1\"" /etc/os-release >/dev/null 2>&1); then
+      Log "Infor" "in Kylin V10 SP1 , will add netctl whlist"
+      /usr/share/sangfor/aTrust/resources/bin/linuxHelper -anw
+   fi
+
+  #添加服务
+  add_service
+  echo "90" > ${progress_file}
+  {
+    trap '' SIGHUP
+    local UEM_DIALOG_PATH="/usr/share/sangfor/aTrust/uem/bin/uem_dialog"
+    if [ -e "${UEM_DIALOG_PATH}" ]; then
+      #安装联动vdi
+      install_vdi
+      #重启提示框，依赖UEM
+      do_pop_tips "$@"
+      #启动aTrust服务
+      start_service
+    else
+      #启动aTrust服务
+      start_service
+      #安装联动vdi
+      install_vdi
+    fi
+    echo "100" > ${progress_file}
+
+  } >> ${LOG_PATH} 2>&1 &
+
+  Log "Infor" "postinst end..."
+}
+
+main "$@"
+exit 0

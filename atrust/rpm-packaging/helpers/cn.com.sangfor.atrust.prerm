@@ -1,0 +1,276 @@
+#!/bin/bash
+
+## 卸载--卸载前钩子调用脚本 (RPM 适配版)
+## 由官方 .deb 的 control/prerm 移植而来。
+
+echo "all argv $*"
+
+# 日志文件路径
+LOG_PATH="/root/.aTrust/logs/aTrustInstallOut.log"
+# 安装包名
+PACKAGE_NAME='cn.com.sangfor.atrust'
+# 获取当前目录
+SCRIPT_PATH=$(dirname "$0")
+
+# shellcheck source=cn.com.sangfor.atrust.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+PACKMAN="/usr/share/sangfor/aTrust/resources/shell/EAIOC/eaio_packman"
+APPHOME="/usr/share/sangfor/aTrust/resources"
+STOP_TRAY_ARGS="-- -s stop"
+TRAY_SH_PATH="${APPHOME}/shell/aTrustTrayStart.sh"
+
+# 参数：remove(卸载) 或 upgrade(覆盖升级)
+ACTION="$1"
+[ -z "${ACTION}" ] && ACTION="remove"
+
+function uninstall_tool(){
+  # 诊断工具在 deb 系统里通过 dpkg 卸载，RPM 系统无 dpkg 时跳过
+  if command -v dpkg >/dev/null 2>&1; then
+    /usr/share/sangfor/aTrust/resources/shell/uninstall_tool.sh >/dev/null 2>&1 &
+  else
+    Log "Infor" "dpkg not found, skip uninstall diagnosis tool via dpkg"
+    rm -rf /opt/apps/cn.com.sangfor.atrustdiagnosistool 2>/dev/null
+    rm -rf /usr/share/sangfor/aTrustDiagnosisTool 2>/dev/null
+  fi
+}
+
+RELEASE_ID=$(lsb_release -i 2>/dev/null | cut -f2)
+
+case $RELEASE_ID in
+ubuntu | Ubuntu | UBUNTU)
+  if [ -e "${PACKMAN}" ]; then
+    if ! "${PACKMAN}" -d SDP ; then
+      Log "Infor" "unregister SDP to AIO fail"
+    fi
+  fi
+  ;;
+esac
+
+if [ "$ACTION" == "upgrade" ]; then
+  Log "Infor" "upgrade..."
+else
+  Log "Infor" "will uninstall tool"
+  uninstall_tool
+  if [ -e "${PACKMAN}" ]; then
+    if ! "${PACKMAN}" -d SDP ; then
+      Log "Infor" "unregister SDP to AIO fail"
+    fi
+  fi
+  rm -f /usr/share/sangfor/.aTrust/var/run/InstallLocation
+  # 删除EAIO托盘启动标记文件
+  rm -f "/tmp/com.sangfor.atrust/force_show"
+fi
+
+#系统判断
+detect_distro() {
+
+  Log "Infor" "prerm start system detect..."
+  local distro=""
+  if command -v lsb_release >/dev/null 2>&1; then
+    distro=$(lsb_release -i 2>/dev/null | cut -f2)
+    VERSION_ID=$(lsb_release -r 2>/dev/null | cut -f2)
+  fi
+  if [ -z "${distro}" ] && [ -r /etc/os-release ]; then
+    distro=$(. /etc/os-release && echo "${ID:-}")
+    VERSION_ID=$(. /etc/os-release && echo "${VERSION_ID:-}")
+  fi
+
+  case $distro in
+  ubuntu | Ubuntu | UBUNTU)
+    RELEASE_TYPE=ubuntu
+    ;;
+  *)
+    RELEASE_TYPE=unkown
+    ;;
+  esac
+
+  Log "Infor" "prerm end system detect with type:${RELEASE_TYPE},version:${VERSION_ID}..."
+}
+
+#ubuntu15.04 之下版本系统服务处理函数
+upstart_del_service() {
+  return 0
+}
+
+#ubuntu15.04及之上  版本系统服务处理函数
+system_del_service() {
+
+  Log "Infor" "prerm start stop atrust service..."
+
+  local autostart_path="/etc/xdg/autostart"
+  if [ -f "${autostart_path}/cn.com.sangfor.atrust.desktop" ];then
+    rm -f "${autostart_path}/cn.com.sangfor.atrust.desktop"
+  fi
+
+  {
+    systemctl daemon-reload
+    systemctl stop aTrustDaemon
+    killall -9 aTrustAgent
+    killall -9 aTrustXtunnel-64
+    [ -e "${TRAY_SH_PATH}" ] && ${TRAY_SH_PATH} ${STOP_TRAY_ARGS}
+    killall -9 aTrustTray2
+    systemctl disable aTrustDaemon
+  } >> ${LOG_PATH} 2>&1
+
+  Log "Infor" "prerm end stop atrust service..."
+}
+
+#停止服务
+del_service() {
+
+  if [ "${RELEASE_TYPE}" = "ubuntu" ]; then
+    VERSION_YEA=$(echo "$VERSION_ID" | awk -F "." '{print$1}')
+    if [ "${VERSION_YEA}" -lt "15" ] 2>/dev/null; then
+      upstart_del_service
+    else
+      system_del_service
+    fi
+  else
+    system_del_service
+  fi
+}
+
+#杀掉进程
+do_kill_process() {
+
+  Log "Infor" "prerm start stop atrust process:${1}..."
+
+  local process_name=${1}
+
+  if pidof "${process_name}"; then
+    killall "${process_name}" >> ${LOG_PATH} 2>&1
+  fi
+  if pidof "${process_name}"; then
+    killall -9 "${process_name}" >> ${LOG_PATH} 2>&1
+  fi
+
+  Log "Infor" "prerm end stop atrust process:${1}..."
+}
+
+#杀死可能存在的atrust进程
+kill_programe() {
+
+  #停止所有相关进程
+  [ -e "${TRAY_SH_PATH}" ] && ${TRAY_SH_PATH} -- -s stop
+  do_kill_process "aTrustTray"
+  do_kill_process "aTrustAgent"
+  do_kill_process "aTrustXtunnel-64"
+}
+
+#停止iptables
+do_stop_iptables() {
+
+  Log "Infor" "prerm start stop atrust iptables..."
+
+  local iptables_name=""
+  local ip6tables_name=""
+  if iptables-legacy -V >/dev/null 2>&1; then
+    iptables_name="iptables-legacy"
+    ip6tables_name="ip6tables-legacy"
+  else
+    iptables_name="iptables"
+    ip6tables_name="ip6tables"
+  fi
+
+  if ! command -v "${iptables_name}" >/dev/null 2>&1; then
+    Log "Infor" "prerm ${iptables_name} not found, skip"
+    return 0
+  fi
+
+  local query_nat_iptables=""
+  query_nat_iptables=$(${iptables_name} -nvL -t nat 2>/dev/null | grep -w 'ATRUST_DNS' | wc -l)
+  if [ "${query_nat_iptables}" -gt 0 ]; then
+    {
+      ${iptables_name} -t nat -F ATRUST_DNS
+      ${iptables_name} -t nat -D OUTPUT -j ATRUST_DNS
+      ${iptables_name} -t nat -X ATRUST_DNS
+    } >> ${LOG_PATH} 2>&1
+  fi
+  Log "Infor" "prerm end stop atrust ${iptables_name}:${query_nat_iptables}..."
+
+  local query_filter_iptables=""
+  query_filter_iptables=$(${iptables_name} -nvL -t filter 2>/dev/null | grep -w 'ATRUST_BLOCK_DNS' | wc -l)
+  if [ "${query_filter_iptables}" -gt 0 ]; then
+    {
+      ${iptables_name} -t filter -F ATRUST_BLOCK_DNS
+      ${iptables_name} -t filter -D OUTPUT -j ATRUST_BLOCK_DNS
+      ${iptables_name} -t filter -X ATRUST_BLOCK_DNS
+    } >> ${LOG_PATH} 2>&1
+  fi
+  Log "Infor" "prerm end stop atrust ${iptables_name}:${query_filter_iptables}..."
+
+  if ! command -v "${ip6tables_name}" >/dev/null 2>&1; then
+    Log "Infor" "prerm ${ip6tables_name} not found, skip"
+    return 0
+  fi
+
+  local query_mangle_iptables=""
+  query_mangle_iptables=$(${ip6tables_name} -nvL -t mangle 2>/dev/null | grep -w 'ATRUST_DNS' | wc -l)
+  if [ "${query_mangle_iptables}" -gt 0 ]; then
+    {
+      ${ip6tables_name} -t mangle -F ATRUST_DNS
+      ${ip6tables_name} -t mangle -D OUTPUT -j ATRUST_DNS
+      ${ip6tables_name} -t mangle -X ATRUST_DNS
+    } >> ${LOG_PATH} 2>&1
+  fi
+  Log "Infor" "prerm end stop atrust ${ip6tables_name}:${query_mangle_iptables}..."
+
+  local query_nat_ip6tables=""
+  query_nat_ip6tables=$(${ip6tables_name} -nvL -t nat 2>/dev/null | grep -w 'ATRUST_DNS' | wc -l)
+  if [ "${query_nat_ip6tables}" -gt 0 ]; then
+    {
+      ${ip6tables_name} -t nat -F ATRUST_DNS
+      ${ip6tables_name} -t nat -D OUTPUT -j ATRUST_DNS
+      ${ip6tables_name} -t nat -X ATRUST_DNS
+    } >> ${LOG_PATH} 2>&1
+  fi
+  Log "Infor" "prerm end stop atrust ${ip6tables_name}:${query_nat_ip6tables}..."
+}
+
+#正常停止进程
+do_stop_processes() {
+
+  local atrust_agent_path="/usr/share/sangfor/aTrust/resources/bin/aTrustAgent"
+  if [ -e ${atrust_agent_path} ]; then
+    ${atrust_agent_path} --plugin plugins/aTrustCore --plugin-stop
+    ${atrust_agent_path} --plugin plugins/aTrustCore --enable-http --enable-event-center --plugin-stop
+    ${atrust_agent_path} --plugin plugin-daemon --plugin-cmd | --plugin-stop
+
+    for ((i = 1; i <= 10; i++)); do
+      ${atrust_agent_path} --plugin plugins/aTrustCore --plugin-detect
+      if [ $? -eq 0 ]; then
+        break
+      else
+        sleep 1
+      fi
+    done
+  fi
+}
+
+#主函数入口
+main() {
+
+  Log "Infor" "prerm start (action=${ACTION})..."
+
+  # RPM 升级顺序为：新包 %pre -> 安装 -> 新包 %post -> 旧包 %preun -> 删除旧文件。
+  # 由于新包 %pre/%post 已经负责停止旧进程并启动服务，升级时不能再停服务，
+  # 否则会把刚启动的新服务杀掉。真正的停止/清理只在卸载时执行。
+  if [ "${ACTION}" == "upgrade" ]; then
+    Log "Infor" "prerm upgrade mode, skip stop service (handled by new %pre/%post)"
+    Log "Infor" "prerm end..."
+    return 0
+  fi
+
+  detect_distro
+  #杀死相关进程
+  kill_programe
+  #停止服务
+  del_service
+  #关闭iptables
+  do_stop_iptables
+
+  Log "Infor" "prerm end..."
+}
+
+main "$@"
+exit 0

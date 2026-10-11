@@ -1,0 +1,21 @@
+#!/bin/sh
+#-------------------------------------------------------------------------------
+# aTrust 托盘启动包装脚本 (Fedora 适配)
+#
+# 统一设置运行所需的环境变量，解决以下 Fedora 兼容性问题：
+#  1) LD_PRELOAD 内置 libsqlite3.so：进程里会同时加载系统 libtinysparql 需要的
+#     系统 libsqlite3.so.0，与内置 SQLCipher(libsqlite3.so) 符号抢占，导致托盘
+#     SEGV（sqlcipher_activate -> NULL）。让内置库优先加载即可。
+#  2) LD_PRELOAD 内置 libcurl.so：系统 libcurl.so.4 基于 OpenSSL4，与内置
+#     OpenSSL1.1 的 SSL 回调 ABI 不一致会导致 SEGV。让内置 curl 优先。
+#  3) QT_QPA_PLATFORM_PLUGIN_PATH：内置 Qt 的平台插件在 resources/lib 下，
+#     不设置会导致 aTrustTray2 等 Qt 程序 qFatal/Abort。
+#  4) FONTCONFIG_FILE：旧版 Electron 无法渲染 Fedora 的可变 CJK 字体(方框)。
+#-------------------------------------------------------------------------------
+ATRUST_RES="/usr/share/sangfor/aTrust/resources"
+
+export LD_PRELOAD="$ATRUST_RES/bin/libsqlite3.so $ATRUST_RES/bin/libcurl.so${LD_PRELOAD:+ $LD_PRELOAD}"
+export QT_QPA_PLATFORM_PLUGIN_PATH="$ATRUST_RES/lib${QT_QPA_PLATFORM_PLUGIN_PATH:+:$QT_QPA_PLATFORM_PLUGIN_PATH}"
+export FONTCONFIG_FILE="/etc/fonts/atrust-fonts.conf"
+
+exec /usr/share/sangfor/aTrust/aTrustTray "$@"
