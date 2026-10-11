@@ -118,6 +118,9 @@ dingtalk/
    中文“桌面”目录）；卸载时清理。安装/卸载脚本会尝试刷新桌面与图标缓存。
 4. **包名/路径**：RPM 包名沿用上游 `com.alibabainc.dingtalk`，安装路径与 deb 一致
    （`/opt/apps/com.alibabainc.dingtalk`），便于与应用内的绝对路径引用保持一致。
+5. **旧 soname 依赖排除**：排除 Fedora 已不再提供的旧 soname（`libpangox-1.0.so.0`、
+   `liblber-2.4.so.2`、`libldap_r-2.4.so.2`），使依赖在 Fedora/RHEL 上可解析
+   （见「已知限制」）。
 
 ## 已验证
 
@@ -125,12 +128,18 @@ dingtalk/
 - 主程序 `com.alibabainc.dingtalk` 在安装目录下 `ldd` 无 missing。
 - `chrome-sandbox` 安装后为 `-rwsr-xr-x`（root:root，setuid 生效）。
 - 桌面快捷方式正确安装到 `/usr/share/applications/`，并在卸载时清理。
-- 所有 ELF 依赖在 Fedora 上均可解析（`dnf install` 依赖校验通过）。
+- 排除旧 soname 后，RPM 元数据依赖在干净的 Fedora 上可解析（`dnf install` 依赖校验通过）。
 
 ## 已知限制
 
 - 自带的旧 GTK2-glext 库（`libgtkglext-x11-1.0.so.0` 等）依赖 Fedora 已不再提供的
   `libpangox-1.0.so.0`，相关依赖已被排除。普通的聊天/会议主界面（Qt/CEF）不受影响；
   仅使用极老旧的 GTK2 GL 控件时可能缺少该库。
+- **自带 `libcurl.so.4` 依赖 OpenLDAP 2.4**（经 `libDingGuard_SDK_UOS.so` 间接使用）：
+  它需要 `liblber-2.4.so.2`/`libldap_r-2.4.so.2` 的 `OPENLDAP_2.4_2` 版本符号，而
+  Fedora 只提供 OpenLDAP 2.6（`openldap-compat` 也没有该版本符号）。因此这两个依赖
+  已被排除，`libcurl`/DingGuard 相关功能在 Fedora 上不可用（主界面、会议、聊天不受
+  影响，它们不加载该库）。如需该功能，可把 Ubuntu `libldap-2.4-2` 的三个 `.so`
+  一并打入 `/opt/apps/com.alibabainc.dingtalk/files/<版本>/`（其 `RUNPATH` 为 `./`）。
 - 未对 Wayland 下的全局快捷键、通知等桌面集成做额外适配，行为与官方 deb 一致。
 

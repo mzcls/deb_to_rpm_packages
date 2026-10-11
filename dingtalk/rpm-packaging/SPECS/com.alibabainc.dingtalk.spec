@@ -14,9 +14,13 @@
 %global _build_id_links none
 
 # 排除 Fedora 已不再提供的旧 soname：
-#   libpangox-1.0.so.0 仅被自带的旧 GTK2-glext 库依赖，现代 Fedora 无此库；
-#   相关 GL 旧控件不可用，但不影响主界面（Qt/CEF）运行。
-%global __requires_exclude ^libpangox-1\\.0\\.so\\.0.*
+#   - libpangox-1.0.so.0：仅被自带的旧 GTK2-glext 库依赖，现代 Fedora 无此库；
+#     相关 GL 旧控件不可用，但不影响主界面（Qt/CEF）运行。
+#   - liblber-2.4.so.2 / libldap_r-2.4.so.2：仅被自带的 libcurl.so.4（经
+#     libDingGuard_SDK_UOS.so 间接使用）依赖。Fedora 只有 OpenLDAP 2.6，且
+#     openldap-compat 并不提供 OPENLDAP_2.4_2 版本符号，故该依赖无法满足；
+#     相关 curl/LDAP 功能不可用，但不影响主界面启动与会议/聊天。
+%global __requires_exclude ^(libpangox-1\\.0\\.so\\.0|liblber-2\\.4\\.so\\.2|libldap_r-2\\.4\\.so\\.2|libldap-2\\.4\\.so\\.2).*
 
 %global dt_appdir /opt/apps/com.alibabainc.dingtalk
 
