@@ -1,0 +1,15 @@
+# 各包的构建产物（各子目录 .gitignore 也会覆盖）
+**/rpmbuild/
+**/dist/
+**/.work/
+*.rpm
+*.src.rpm
+*.deb
+
+# 校验和 / 版本元数据
+**/SHA256SUMS.txt
+**/VERSION
+**/ARCH
+
+# 构建日志
+*.log

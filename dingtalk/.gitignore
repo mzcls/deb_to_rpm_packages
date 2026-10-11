@@ -1,0 +1,16 @@
+# 构建产物（不入库）
+/rpmbuild/
+/dist/
+/*.rpm
+/*.src.rpm
+/SHA256SUMS.txt
+/VERSION
+/ARCH
+/.work/
+
+# 官方 deb（约 357MB，远超 GitHub 单文件 100MB 限制）
+# 默认忽略；如使用 Git LFS 托管，请执行: git lfs install && git add -f com.alibabainc.dingtalk_*.deb
+*.deb
+
+# 构建日志
+*.log

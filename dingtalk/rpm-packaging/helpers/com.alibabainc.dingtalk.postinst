@@ -1,0 +1,84 @@
+#!/bin/bash
+
+## 安装后钩子脚本 (RPM 适配版)
+## 由官方 .deb 的 control/postinst 移植而来，用于 Fedora/RHEL 等 RPM 发行版。
+##
+## 与 deb 的差异：
+##   - deb 会在 configure 阶段按系统 glibc / 发行版删除包内自带的部分库；
+##     这些库的删减已移到构建阶段（见 spec 的 %install 与 README），此处不再重复。
+##   - 这里保留运行时才能完成的工作：把桌面快捷方式发放到各用户桌面，
+##     并确保 CEF 的 chrome-sandbox 具备 setuid 权限。
+
+echo "all argv $*"
+
+PACKAGE_NAME='com.alibabainc.dingtalk'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=com.alibabainc.dingtalk.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+DESKTOP_FILE="/usr/share/applications/${PACKAGE_NAME}.desktop"
+
+# 把桌面快捷方式复制到所有用户的桌面目录
+send_desktop_to_users() {
+	DingTalkLog "Infor" "postinst begin: distribute desktop entry"
+
+	local user home_dir desktop_path
+	for user in $(dingtalk_list_users); do
+		home_dir=$(getent passwd "$user" | awk -F: '{print $6}')
+		[ -z "$home_dir" ] && continue
+		[ -d "$home_dir" ] || continue
+
+		desktop_path=""
+		if [ -f "${home_dir}/.config/user-dirs.dirs" ]; then
+			desktop_path=$(awk -F'"' '/^XDG_DESKTOP_DIR/{print $2}' "${home_dir}/.config/user-dirs.dirs")
+			desktop_path=$(eval echo "$desktop_path")
+		fi
+		[ -z "$desktop_path" ] && desktop_path="${home_dir}/Desktop"
+
+		if [ -f "$DESKTOP_FILE" ] && [ -d "$desktop_path" ]; then
+			cp -f "$DESKTOP_FILE" "${desktop_path}/${PACKAGE_NAME}.desktop" 2>/dev/null
+			chown "${user}" "${desktop_path}/${PACKAGE_NAME}.desktop" 2>/dev/null
+			chmod 755 "${desktop_path}/${PACKAGE_NAME}.desktop" 2>/dev/null
+			DingTalkLog "Infor" "installed desktop entry for ${user} -> ${desktop_path}"
+		fi
+
+		# 兼容中文“桌面”目录
+		if [ -f "$DESKTOP_FILE" ] && [ -d "${home_dir}/桌面" ]; then
+			cp -f "$DESKTOP_FILE" "${home_dir}/桌面/${PACKAGE_NAME}.desktop" 2>/dev/null
+			chown "${user}" "${home_dir}/桌面/${PACKAGE_NAME}.desktop" 2>/dev/null
+			chmod 755 "${home_dir}/桌面/${PACKAGE_NAME}.desktop" 2>/dev/null
+		fi
+	done
+
+	DingTalkLog "Infor" "postinst end: distribute desktop entry"
+}
+
+# 确保 chrome-sandbox 具备 setuid（CEF 沙箱需要）
+fix_chrome_sandbox() {
+	local product_version sandbox
+	product_version=$(dingtalk_product_version)
+	[ -z "$product_version" ] && return 0
+	sandbox="${DINGTALK_APP_DIR}/files/${product_version}/plugins/dtwebview/chrome-sandbox"
+	if [ -f "$sandbox" ]; then
+		chown root:root "$sandbox" 2>/dev/null
+		chmod 4755 "$sandbox" 2>/dev/null
+		DingTalkLog "Infor" "chrome-sandbox setuid ensured: ${sandbox}"
+	fi
+}
+
+main() {
+	DingTalkLog "Infor" "postinst start..."
+	fix_chrome_sandbox
+	send_desktop_to_users
+	# 刷新桌面/图标缓存，便于 GNOME/KDE 立即显示
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
+	fi
+	if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+		gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
+	fi
+	DingTalkLog "Infor" "postinst end..."
+}
+
+main "$@"
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/bash
+
+## 卸载前钩子脚本 (RPM 适配版)
+## 由官方 .deb 的 control/prerm/postrm 移植而来。
+##
+## 参数：remove(卸载) 或 upgrade(覆盖升级)
+
+echo "all argv $*"
+
+PACKAGE_NAME='wemeet'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=wemeet.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+ACTION="${1:-remove}"
+
+kill_wemeet()
+{
+	WemeetLog "Infor" "prerm begin: stop wemeetapp"
+	if pgrep -f 'wemeetapp' >/dev/null 2>&1; then
+		pkill -f 'wemeetapp' >/dev/null 2>&1 || true
+		sleep 1
+		if pgrep -f 'wemeetapp' >/dev/null 2>&1; then
+			pkill -9 -f 'wemeetapp' >/dev/null 2>&1 || true
+		fi
+	fi
+	WemeetLog "Infor" "prerm end: stop wemeetapp"
+}
+
+main()
+{
+	WemeetLog "Infor" "prerm start (action=${ACTION})..."
+	kill_wemeet
+	WemeetLog "Infor" "prerm end..."
+}
+
+main "$@"
+exit 0

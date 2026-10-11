@@ -1,0 +1,47 @@
+#!/bin/bash
+
+## 卸载前钩子脚本 (RPM 适配版)
+## 由官方 .deb 的 control/prerm 移植而来。
+##
+## 参数：remove(卸载) 或 upgrade(覆盖升级)
+
+echo "all argv $*"
+
+PACKAGE_NAME='com.alibabainc.dingtalk'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=com.alibabainc.dingtalk.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+ACTION="${1:-remove}"
+
+# 关闭正在运行的钉钉进程（与 deb prerm 行为一致）
+kill_dingtalk_processes() {
+	DingTalkLog "Infor" "prerm begin: stop dingtalk processes"
+
+	local p
+	for p in com.alibabainc.dingtalk dingtalk_dll.so; do
+		if pidof "$p" >/dev/null 2>&1; then
+			pkill -f "$p" >/dev/null 2>&1 || true
+			sleep 1
+			if pidof "$p" >/dev/null 2>&1; then
+				pkill -9 -f "$p" >/dev/null 2>&1 || true
+			fi
+		fi
+	done
+
+	# 兜底：按 deb 匹配的主程序命令行
+	if pgrep -f 'com.alibabainc.dingtalk --' >/dev/null 2>&1; then
+		pkill -f 'com.alibabainc.dingtalk --' >/dev/null 2>&1 || true
+	fi
+
+	DingTalkLog "Infor" "prerm end: stop dingtalk processes"
+}
+
+main() {
+	DingTalkLog "Infor" "prerm start (action=${ACTION})..."
+	kill_dingtalk_processes
+	DingTalkLog "Infor" "prerm end..."
+}
+
+main "$@"
+exit 0

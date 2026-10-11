@@ -1,0 +1,46 @@
+#!/bin/bash
+
+## 卸载后钩子脚本 (RPM 适配版)
+## 由官方 .deb 的 control/postrm 移植而来。
+##
+## 参数：$1 = 0 表示完全卸载（需要清理用户桌面的快捷方式），
+##        $1 = 1 表示升级（新包的 %post 会重新发放，这里不清理）。
+
+echo "all argv $*"
+
+PACKAGE_NAME='com.alibabainc.dingtalk'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=com.alibabainc.dingtalk.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+ARG1="${1:-0}"
+
+remove_desktop_from_users() {
+	DingTalkLog "Infor" "postrm begin: remove desktop entry from users"
+
+	local user home_dir
+	for user in $(dingtalk_list_users); do
+		home_dir=$(getent passwd "$user" | awk -F: '{print $6}')
+		[ -z "$home_dir" ] && continue
+
+		rm -f "${home_dir}/Desktop/${PACKAGE_NAME}.desktop" 2>/dev/null
+		rm -f "${home_dir}/桌面/${PACKAGE_NAME}.desktop" 2>/dev/null
+	done
+
+	rm -f "/root/Desktop/${PACKAGE_NAME}.desktop" 2>/dev/null
+
+	DingTalkLog "Infor" "postrm end: remove desktop entry from users"
+}
+
+main() {
+	DingTalkLog "Infor" "postrm start (arg=${ARG1})..."
+	if [ "$ARG1" = "0" ]; then
+		remove_desktop_from_users
+	else
+		DingTalkLog "Infor" "postrm upgrade mode, keep desktop entries"
+	fi
+	DingTalkLog "Infor" "postrm end..."
+}
+
+main "$@"
+exit 0

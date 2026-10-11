@@ -1,0 +1,249 @@
+name: Build RPM
+
+# 单仓多包：每个应用一个子目录，工作流位于仓库根目录，可构建不同的包。
+# 版本来源：各包目录下的 version 文件（单行，内容为对应 .deb 的下载地址）。
+#
+# 触发方式：
+#   - push 到 main/master 且某个包的 version / 打包文件 / build-rpm.sh
+#     （或本工作流本身）发生变化 -> 自动构建受影响的包；仅工作流变化时构建全部。
+#   - 手动触发（Run workflow）：可选择构建 atrust / dingtalk / wemeet / 全部，
+#     并可勾选 force_release 强制重发，选择构建镜像与发布标签。
+#   - 下载的 deb 统一重命名后与 RPM 一起产出。
+#   - 发布策略：某包版本若已存在对应 Release(<包名>-v<版本>) 则只出 artifact，
+#     不重复发布；版本变化时才创建新 Release。
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "要构建的包"
+        type: choice
+        options:
+          - all
+          - atrust
+          - dingtalk
+          - wemeet
+        default: all
+      force_release:
+        description: "版本已存在时也强制重新发布 Release"
+        type: boolean
+        default: false
+      fedora_image:
+        description: "构建镜像（默认 fedora:latest；如需 fc45 可填 fedora:rawhide）"
+        type: string
+        default: "fedora:latest"
+      dist_tag:
+        description: "发布标签，如 .fc45；none=去掉标签(发行版无关)；留空=用镜像默认"
+        type: string
+        default: ""
+  push:
+    branches: [ main, master ]
+    paths:
+      - "atrust/version"
+      - "atrust/build-rpm.sh"
+      - "atrust/rpm-packaging/**"
+      - "dingtalk/version"
+      - "dingtalk/build-rpm.sh"
+      - "dingtalk/rpm-packaging/**"
+      - "WeMeet/version"
+      - "WeMeet/build-rpm.sh"
+      - "WeMeet/rpm-packaging/**"
+      - ".github/workflows/build-rpm.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-rpm-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  # 选择需要构建的包，输出带 {package,dir,rpm_name} 的 matrix
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: 检出仓库（含历史，用于变更检测）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 选择要构建的包
+        id: pick
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # 包清单：名称|子目录|RPM 包名
+          cat > /tmp/pkgs.tsv <<'EOF'
+          atrust	atrust	cn.com.sangfor.atrust
+          dingtalk	dingtalk	com.alibabainc.dingtalk
+          wemeet	WeMeet	wemeet
+          EOF
+          ALL=(atrust dingtalk wemeet)
+          declare -a chosen=()
+
+          if [ -n "${INPUT_PACKAGE:-}" ] && [ "${INPUT_PACKAGE}" != "all" ]; then
+            chosen=("${INPUT_PACKAGE}")
+            echo "手动触发，构建指定的包: ${INPUT_PACKAGE}"
+          elif [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            chosen=("${ALL[@]}")
+            echo "手动触发，构建全部包"
+          else
+            # push：根据变更文件判断受影响的包
+            if [ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              changed="$(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")"
+            else
+              changed="$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")"
+            fi
+            echo "本次变更文件："; echo "${changed}"
+            for p in "${ALL[@]}"; do
+              dir="$(awk -F'\t' -v k="$p" '$1==k{print $2}' /tmp/pkgs.tsv)"
+              if printf '%s\n' "${changed}" | grep -qE "^${dir}/"; then
+                chosen+=("$p")
+              fi
+            done
+            # 仅工作流自身变化时，稳妥起见构建全部
+            if [ "${#chosen[@]}" -eq 0 ] && printf '%s\n' "${changed}" | grep -qE '^\.github/'; then
+              chosen=("${ALL[@]}")
+              echo "仅工作流变化，构建全部包"
+            fi
+          fi
+
+          json="["
+          first=1
+          for p in "${chosen[@]}"; do
+            dir="$(awk -F'\t' -v k="$p" '$1==k{print $2}' /tmp/pkgs.tsv)"
+            rpm="$(awk -F'\t' -v k="$p" '$1==k{print $3}' /tmp/pkgs.tsv)"
+            [ -z "$dir" ] && continue
+            [ $first -eq 0 ] && json+=","
+            json+="{\"package\":\"$p\",\"dir\":\"$dir\",\"rpm_name\":\"$rpm\"}"
+            first=0
+          done
+          json+="]"
+
+          echo "选定构建: ${json}"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: select
+    if: needs.select.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ inputs.fedora_image || 'fedora:latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.select.outputs.matrix) }}
+    steps:
+      - name: 解析包信息
+        id: pkg
+        run: |
+          set -euo pipefail
+          echo "构建包: ${{ matrix.package }} (${{ matrix.rpm_name }})，目录: ${{ matrix.dir }}"
+
+      - name: 安装构建依赖
+        run: |
+          dnf install -y rpm-build binutils xz curl tar gzip git git-lfs findutils patchelf
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: 显示 version 配置
+        working-directory: ${{ matrix.dir }}
+        run: |
+          echo "version 文件内容:"; cat version
+
+      - name: 检查打包文件是否齐全
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          echo "工作目录: $PWD"
+          echo "--- 包目录 ---"; ls -la
+          echo "--- rpm-packaging 实际文件 ---"; find rpm-packaging -type f -print || true
+          miss=0
+          for f in rpm-packaging/SPECS/*.spec rpm-packaging/helpers/*; do
+            [ -s "$f" ] || { echo "::error::缺少文件: $f"; miss=1; }
+          done
+          [ "$miss" = 0 ] || { echo "::error::仓库缺少打包文件（helpers/spec），请确认已提交并推送。"; exit 1; }
+          echo "打包文件齐全。"
+
+      - name: 构建 RPM（自动读取 version 并下载 deb）
+        working-directory: ${{ matrix.dir }}
+        run: |
+          chmod +x build-rpm.sh
+          ./build-rpm.sh ${{ inputs.dist_tag && format('--dist {0}', inputs.dist_tag) || '' }}
+
+      - name: 读取产物信息
+        id: meta
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          echo "version=$(cat dist/VERSION)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(cat dist/ARCH)"       >> "$GITHUB_OUTPUT"
+          echo "构建版本: $(cat dist/VERSION) ($(cat dist/ARCH))"
+          ls -l dist
+
+      - name: 检查该版本 Release 是否已存在
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ matrix.package }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${PKG}-v${VERSION}"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")"
+          if [ "$CODE" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::版本 ${TAG} 已存在 Release，本次仅构建产物、不重复发布"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::将发布新 Release ${TAG}"
+          fi
+
+      - name: 依赖校验（安装文件但不执行脚本）
+        working-directory: ${{ matrix.dir }}
+        env:
+          RPM_NAME: ${{ matrix.rpm_name }}
+        run: |
+          RPM="$(ls dist/*.rpm | grep -v '\.src\.rpm' | head -1)"
+          echo "校验: $RPM"
+          dnf install -y --setopt=tsflags=noscripts --setopt=install_weak_deps=False "$RPM"
+          rpm -q "${RPM_NAME}"
+          echo "文件数: $(rpm -ql "${RPM_NAME}" | wc -l)"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-rpm-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ matrix.dir }}/dist/*.rpm
+            ${{ matrix.dir }}/dist/*.deb
+            ${{ matrix.dir }}/dist/SHA256SUMS.txt
+            ${{ matrix.dir }}/dist/VERSION
+            ${{ matrix.dir }}/dist/ARCH
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: 发布 Release（版本变化时）
+        if: ${{ steps.rel.outputs.exists == 'false' || inputs.force_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.package }}-v${{ steps.meta.outputs.version }}
+          name: ${{ matrix.package }} ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            ${{ matrix.dir }}/dist/*.rpm
+            ${{ matrix.dir }}/dist/*.deb
+            ${{ matrix.dir }}/dist/SHA256SUMS.txt

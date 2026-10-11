@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# 钉钉 RPM 维护脚本公共函数（由官方 .deb 的 control 脚本移植）
+# 日志文件路径
+DINGTALK_LOG_PATH="/var/log/dingtalk/rpm-install.log"
+DINGTALK_PRODUCT_NAME="com.alibabainc.dingtalk"
+DINGTALK_APP_DIR="/opt/apps/com.alibabainc.dingtalk"
+
+# 日志输出：既写日志文件，也输出到 stdout（便于 rpm 前端查看）
+DingTalkLog()
+{
+	if [ $# -lt 2 ]; then
+		return 0
+	fi
+	local LOG_LEV="$1"
+	local LOG_FMT="$2"
+	shift 2
+
+	local log_dir
+	log_dir=$(dirname "$DINGTALK_LOG_PATH")
+	if [ ! -d "$log_dir" ]; then
+		mkdir -p "$log_dir" 2>/dev/null
+	fi
+
+	local line
+	line="[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_LEV] ${LOG_FMT} $*"
+	echo "$line"
+	echo "$line" >> "$DINGTALK_LOG_PATH" 2>/dev/null || true
+}
+
+# 返回钉钉的产品版本目录名（内容同 files/version，例如 8.2.8-Release.260818002）
+dingtalk_product_version()
+{
+	local version_file="${DINGTALK_APP_DIR}/files/version"
+	if [ -r "$version_file" ]; then
+		head -n1 "$version_file" | tr -d '[:space:]'
+	else
+		# 回退：取 files 下唯一的版本目录
+		local d
+		d=$(find "${DINGTALK_APP_DIR}/files" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n1)
+		[ -n "$d" ] && basename "$d"
+	fi
+}
+
+# 遍历系统中的普通用户（家目录位于 /home 或 /root 之外的 passwd 条目）
+dingtalk_list_users()
+{
+	awk -F: '$3 >= 1000 && $3 < 60000 && $7 !~ /(nologin|false)$/ {print $1}' /etc/passwd
+}

@@ -1,0 +1,33 @@
+#!/bin/bash
+
+## 安装后钩子脚本 (RPM 适配版)
+## 由官方 .deb 的 control/postinst 移植而来。
+##
+## 官方 postinst 会：给可执行文件加执行位、用 xdg-icon-resource 安装图标、
+## 刷新桌面数据库、结束正在运行的 wemeetapp。
+## 这里：图标已在构建阶段装入 /usr/share/icons/hicolor，脚本只负责执行位、
+## 刷新缓存，并在升级时结束旧进程（结束进程主要在 %pre 完成）。
+
+echo "all argv $*"
+
+PACKAGE_NAME='wemeet'
+SCRIPT_PATH=$(dirname "$0")
+# shellcheck source=wemeet.common
+source "${SCRIPT_PATH}/${PACKAGE_NAME}.common"
+
+fix_exec_bits()
+{
+	[ -f "${WEMEET_APP_DIR}/wemeetapp.sh" ] && chmod +x "${WEMEET_APP_DIR}/wemeetapp.sh"
+	[ -f "${WEMEET_APP_DIR}/bin/wemeetapp" ] && chmod +x "${WEMEET_APP_DIR}/bin/wemeetapp"
+}
+
+main()
+{
+	WemeetLog "Infor" "postinst start..."
+	fix_exec_bits
+	wemeet_update_caches
+	WemeetLog "Infor" "postinst end..."
+}
+
+main "$@"
+exit 0
